@@ -150,6 +150,9 @@ MOUNTS: list[Mount] = [
     # other
     Mount(XDG_CONFIG_HOME / "agents", HOME / ".config/agents", MountKind.BIND_RO),
     Mount(XDG_CONFIG_HOME / "helix", HOME / ".config/helix", MountKind.BIND_RO),
+    Mount(
+        XDG_CONFIG_HOME / "jj/repos", HOME / ".config/jj/repos", MountKind.BIND_RO
+    ),  # workaround https://github.com/jj-vcs/jj/issues/9579
     Mount(XDG_CONFIG_HOME / "rumdl", HOME / ".config/rumdl", MountKind.BIND_RO),
     Mount(HOME / ".local/libexec/agents", None, MountKind.BIND_RO),
     Mount(XDG_STATE_HOME / "neorev", HOME / ".local/state/neorev", MountKind.BIND_RO),

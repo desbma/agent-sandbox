@@ -1,0 +1,557 @@
+#!/usr/bin/env -S python3 -S
+
+"""Run coding agent in tight bubblewrap sandbox."""
+
+#
+# Note: To use KVM in guest, we need have write access to /dev/kvm, without the kvm group,
+# because bubblewrap does not support supplementary groups, and changing the primary group would
+# probably break other stuff (for example when the guest creates files).
+# Setup with:
+# printf 'KERNEL=="kvm", OWNER:="%s", GROUP:="kvm", MODE:="0660"\n' "$USER" | sudo tee /etc/udev/rules.d/99-local-kvm-owner.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+# Test in guest with:
+# printf 'info kvm\nquit\n' | qemu-system-x86_64 -accel kvm -machine none -nodefaults -display none -serial none -monitor stdio -S
+#
+
+import collections
+import contextlib
+import dataclasses
+import enum
+import grp
+import os
+import pwd
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+class MountKind(enum.Enum):
+    """Describe how a host path is exposed inside the sandbox."""
+
+    BIND_RO = enum.auto()
+    BIND_RW = enum.auto()
+    OVERLAYFS = enum.auto()
+    TMPFS = enum.auto()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Mount:
+    """Describe a host path exposed in the sandbox, optionally remapped to another target."""
+
+    src: Path
+    dst: Path | None
+    kind: MountKind
+
+    @property
+    def target(self) -> Path:
+        """Return the path the mount appears at inside the sandbox."""
+        return self.dst or self.src
+
+
+AGENT = Path(sys.argv[1]).name
+DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
+
+
+def detect_repo_root() -> Path | None:
+    """Root of the jj or git repo containing the cwd, first match wins."""
+    for cmd in [["jj", "root"], ["git", "rev-parse", "--show-toplevel"]]:
+        try:
+            out = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        return Path(out.stdout.strip())
+    return None
+
+
+def fatal_error(msg: str) -> None:
+    """Show an error message and exit."""
+    sys.stderr.write(f"{Path(__file__).name}: {msg}\n")
+    sys.exit(1)
+
+
+def prompt_bool(msg: str, *, default: bool = False) -> bool:
+    """Prompt the user with a boolean question."""
+    result = {
+        "": default,
+        "y": True,
+        "n": False,
+    }
+    while True:
+        answer = ""
+        if sys.stdin.isatty():
+            with contextlib.suppress(EOFError):
+                answer = (
+                    input(
+                        f"{Path(__file__).name}: {msg} [{'Y/n' if default else 'y/N'}] ",
+                    )
+                    .strip()
+                    .lower()
+                )
+        with contextlib.suppress(KeyError):
+            return result[answer]
+
+
+def confirm_cwd() -> Path:
+    """Confirm startup directory if needed."""
+    cwd = Path.cwd()
+    repo_root = detect_repo_root()
+    if (
+        (repo_root is not None)
+        and (repo_root != cwd)
+        and prompt_bool(f"Run in repo root {str(repo_root)!r} instead of {str(cwd)!r}?")
+    ):
+        cwd = repo_root
+    elif cwd == Path.home():
+        fatal_error(f"Refusing to start in {str(HOME)!r}")
+    return cwd
+
+
+# host dirs
+HOME = Path.home()
+CWD = confirm_cwd()
+XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache"))
+XDG_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+XDG_RUNTIME_DIR = Path(os.environ["XDG_RUNTIME_DIR"])
+XDG_STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
+
+# static mounts in sandbox
+MOUNTS: list[Mount] = [
+    # tmpfs
+    Mount(HOME, None, MountKind.TMPFS),
+    Mount(XDG_RUNTIME_DIR, None, MountKind.TMPFS),
+    Mount(Path("/run"), None, MountKind.TMPFS),
+    Mount(Path("/tmp"), None, MountKind.TMPFS),
+    Mount(Path("/usr/local"), None, MountKind.TMPFS),
+    # read-only binds
+    Mount(Path("/usr"), None, MountKind.BIND_RO),
+    Mount(Path("/opt/intel"), None, MountKind.BIND_RO),
+    # system config
+    Mount(Path("/etc/alternatives"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/ca-certificates"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/fonts"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/hosts"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/lsb-release"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/makepkg.conf"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/man_db.conf"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/manpath.config"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/os-release"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/resolv.conf"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/ssl"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/terminfo"), None, MountKind.BIND_RO),
+    # other
+    Mount(XDG_CONFIG_HOME / "agents", HOME / ".config/agents", MountKind.BIND_RO),
+    Mount(XDG_CONFIG_HOME / "helix", HOME / ".config/helix", MountKind.BIND_RO),
+    Mount(XDG_CONFIG_HOME / "rumdl", HOME / ".config/rumdl", MountKind.BIND_RO),
+    Mount(HOME / ".local/libexec/agents", None, MountKind.BIND_RO),
+    Mount(XDG_STATE_HOME / "neorev", HOME / ".local/state/neorev", MountKind.BIND_RO),
+    Mount(CWD / ".git", None, MountKind.BIND_RO),
+    Mount(CWD / ".jj", None, MountKind.BIND_RO),
+    # overlayfs (writes don't reach host)
+    Mount(
+        Path(os.environ.get("CARGO_HOME", str(HOME / ".cargo"))),
+        HOME / ".cargo",
+        MountKind.OVERLAYFS,
+    ),
+    Mount(
+        Path(os.environ.get("RUSTUP_HOME", str(HOME / ".rustup"))),
+        HOME / ".rustup",
+        MountKind.OVERLAYFS,
+    ),
+    Mount(XDG_CACHE_HOME / "uv", HOME / ".cache/uv", MountKind.OVERLAYFS),
+    Mount(
+        XDG_DATA_HOME / "uv/python",
+        HOME / ".local/share/uv/python",
+        MountKind.OVERLAYFS,
+    ),
+    Mount(CWD / ".venv", None, MountKind.OVERLAYFS),
+    # read-write binds
+    Mount(
+        XDG_CACHE_HOME / "agent-microvm",
+        HOME / ".cache/agent-microvm",
+        MountKind.BIND_RW,
+    ),
+    Mount(CWD, None, MountKind.BIND_RW),
+]
+
+# global dynamically generated AGENTS.md
+GLOBAL_AGENTS_MD_ADDITION = """## Sandbox environment
+
+You are running in a `bwrap` based sandbox.
+
+- Do not attempt to directly run commands that require privileges (`sudo`, `su`, etc.), they would fail. If you need to do so, use the `agent-microvm` skill.
+- You have unrestricted network access.
+- You have a different view of the filesystem than the user. Some notable mount points in your environment are:
+  - tmpfs filesystems (paths under these can not be accessed outside of the sandbox by the user, unless under a deeper mount point; they may also be cleared if the agent is restarted): TMPFS_LIST
+  - overlayfs filesystems (your sandbox inherits their content on startup, but changes are not reflected outside of the sandbox): OVERLAYFS_LIST
+  - read-only bind mounts: BIND_RO_LIST
+  - normal bind mounts (allowing writes, reflected outside of the sandbox): BIND_RW_LIST
+- If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `EXCHANGE_DIR` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.
+- `xdg-open` is available to open files or URLs for the user."""
+GLOBAL_AGENTS_MD = {
+    "amp": HOME / ".config/amp/AGENTS.md",
+    "claude": HOME / ".claude/CLAUDE.md",
+    "codex": HOME / ".codex/AGENTS.md",
+    "pi": HOME / ".pi/agent/AGENTS.md",
+}
+
+# tools to expose in sandbox, even if not under /usr
+TOOLS = [os.environ["EDITOR"], "jj", "ruff", "rumdl", "ty", "uv", "uvx"]
+
+# per-agent extra mounts
+AGENT_MOUNTS: dict[str, list[Mount]] = {
+    "amp": [
+        Mount(XDG_CACHE_HOME / "amp", HOME / ".amp", MountKind.BIND_RW),
+        Mount(
+            XDG_CONFIG_HOME / "agents/skills",
+            HOME / ".config/agents/skills",
+            MountKind.BIND_RW,
+        ),
+        Mount(XDG_CONFIG_HOME / "amp", HOME / ".config/amp", MountKind.BIND_RW),
+        Mount(XDG_DATA_HOME / "amp", HOME / ".local/share/amp", MountKind.BIND_RW),
+    ],
+    "claude": [
+        Mount(
+            XDG_CONFIG_HOME / "agents/skills",
+            HOME / ".claude/skills",
+            MountKind.BIND_RW,
+        ),
+        Mount(XDG_CONFIG_HOME / "claude", HOME / ".claude", MountKind.BIND_RW),
+        Mount(
+            XDG_CONFIG_HOME / "claude/claude.json",
+            HOME / ".claude.json",
+            MountKind.BIND_RW,
+        ),
+        Mount(Path("/opt/claude-code"), None, MountKind.BIND_RO),
+    ],
+    "codex": [
+        Mount(
+            XDG_CONFIG_HOME / "agents/skills",
+            HOME / ".agents/skills",
+            MountKind.BIND_RW,
+        ),
+        Mount(XDG_CONFIG_HOME / "codex", HOME / ".codex", MountKind.BIND_RW),
+    ],
+    "pi": [
+        Mount(
+            XDG_CONFIG_HOME / "agents/skills",
+            HOME / ".agents/skills",
+            MountKind.BIND_RW,
+        ),
+        Mount(XDG_CONFIG_HOME / "pi", HOME / ".pi", MountKind.BIND_RW),
+        Mount(HOME / ".local/libexec/pi", None, MountKind.BIND_RO),
+    ],
+}
+
+# symlinks in sandbox
+SYMLINKS = {
+    Path("/usr/bin"): Path("/bin"),
+    Path("/usr/lib"): Path("/lib"),
+    Path("/usr/lib64"): Path("/lib64"),
+    Path("/usr/sbin"): Path("/sbin"),
+    Path("/tmp"): Path("/var/tmp"),
+}
+AGENT_SYMLINKS = {
+    "claude": {
+        CWD / "AGENTS.md": CWD / "CLAUDE.md",
+    },
+}
+
+# env
+SANDBOX_BIN_DIR = Path("/run/bin")
+ENV_SET = {
+    "PATH": ":".join(
+        (
+            str(SANDBOX_BIN_DIR),
+            str(HOME / ".local/libexec/agents"),
+            str(HOME / ".cargo/bin"),
+            str(HOME / ".local/bin"),
+            "/usr/bin",
+        ),
+    ),
+    "PS1": f"{AGENT}-sandbox$ ",
+    "UV_LINK_MODE": "copy",
+}
+ENV_FORWARD = [
+    "COLORTERM",
+    "EDITOR",
+    "HOME",
+    "PYTHONPYCACHEPREFIX",
+    "RUFF_CACHE_DIR",
+    "TERM",
+    "XDG_RUNTIME_DIR",
+]
+
+# groups to copy from host in sandbox
+GROUPS = ["kvm", "nobody", "nogroup"]
+
+
+def memfd_data(data: bytes) -> int:
+    """Generate a memfd with data written in it."""
+    fd = os.memfd_create("", 0)
+    os.write(fd, data)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return fd
+
+
+def gen_passwd() -> bytes:
+    """Generate stripped down /etc/passwd file content."""
+    b = bytearray()
+    uid = os.getuid()
+    bash = "/usr/bin/bash"
+    entries = [pwd.getpwuid(uid)]
+    for group in GROUPS:
+        with contextlib.suppress(KeyError):
+            entries.append(pwd.getpwnam(group))
+    for entry in entries:
+        entry_vals = list(entry)
+        if (entry.pw_uid == uid) and (entry.pw_shell != bash):
+            entry_vals[6] = bash
+        b.extend(":".join(map(str, entry_vals)).encode())
+        b.extend(b"\n")
+    return bytes(b)
+
+
+def gen_group() -> bytes:
+    """Generate stripped down /etc/group file content."""
+    b = bytearray()
+    gid = os.getgid()
+    entries = [grp.getgrgid(gid)]
+    for group_name in GROUPS:
+        with contextlib.suppress(KeyError):
+            entries.append(grp.getgrnam(group_name))
+    for grp_entry in entries:
+        fields: list[str] = [
+            grp_entry.gr_name,
+            grp_entry.gr_passwd or "",
+            str(grp_entry.gr_gid),
+            ",".join(grp_entry.gr_mem),
+        ]
+        b.extend(":".join(fields).encode())
+        b.extend(b"\n")
+    return bytes(b)
+
+
+def gen_global_agents_md(
+    exchange_dir: Path | None,
+    *,
+    has_unjaild: bool,
+    dir_mounts: dict[MountKind, list[Path]],
+) -> bytes | None:
+    """Generate content for global AGENTS.md."""
+    try:
+        with (XDG_CONFIG_HOME / "agents/AGENTS.md").open("rt") as f:
+            base_global_agents_md = f.read().strip()
+    except FileNotFoundError:
+        base_global_agents_md = None
+    if exchange_dir is None:
+        global_agents_md_addition = "\n".join(
+            line
+            for line in GLOBAL_AGENTS_MD_ADDITION.splitlines()
+            if "EXCHANGE_DIR" not in line
+        )
+    else:
+        global_agents_md_addition = GLOBAL_AGENTS_MD_ADDITION.replace(
+            "EXCHANGE_DIR",
+            str(exchange_dir),
+        )
+    for kind, kind_mounts in dir_mounts.items():
+        key = f"{kind.name}_LIST"
+        global_agents_md_addition = global_agents_md_addition.replace(
+            key,
+            ", ".join(f"`{kind_mount!s}`" for kind_mount in kind_mounts),
+        )
+    if not has_unjaild:
+        global_agents_md_addition = "\n".join(
+            line
+            for line in global_agents_md_addition.splitlines()
+            if "xdg-open" not in line
+        )
+    if base_global_agents_md is None:
+        return global_agents_md_addition.encode()
+    return f"{base_global_agents_md}\n\n{global_agents_md_addition}\n".encode()
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    bwrap_args = [
+        "bwrap",
+        "--unshare-all",
+        "--share-net",
+        "--dev",
+        "/dev",
+        "--dev-bind",
+        "/dev/kvm",
+        "/dev/kvm",
+        "--proc",
+        "/proc",
+    ]
+
+    # static mounts
+    mounts = list(MOUNTS) + AGENT_MOUNTS.get(AGENT, [])
+
+    # bind target binary
+    agent_bin = shutil.which(sys.argv[1])
+    assert agent_bin is not None
+    agent_bin = Path(agent_bin)
+    if not agent_bin.is_relative_to("/usr"):
+        mounts.append(Mount(agent_bin, None, MountKind.BIND_RO))
+
+    # exchange dir in /run
+    if not CWD.is_relative_to("/tmp"):
+        exchange_dir = XDG_RUNTIME_DIR / "-".join(
+            p.lower() for p in (AGENT, *CWD.parts[-2:])
+        )
+        exchange_dir.mkdir(parents=True, exist_ok=True)
+        mounts.append(Mount(exchange_dir, None, MountKind.BIND_RW))
+    else:
+        exchange_dir = None
+
+    # tools to expose, even if not under /usr
+    for tool_name in TOOLS:
+        tool = Path(tool_name)
+        if not tool.is_absolute():
+            resolved = shutil.which(tool_name)
+            if resolved is None:
+                continue
+            tool = Path(resolved)
+        if not tool.exists() or tool.is_relative_to("/usr"):
+            continue
+        mounts.append(Mount(tool, None, MountKind.BIND_RO))
+
+    # tmpfs over Cargo target dir to avoid build files being invalidated
+    # by different sandbox env
+    target_dir = CWD / "target"
+    if (CWD / "Cargo.toml").is_file() and target_dir.is_dir():
+        mounts.append(Mount(target_dir, None, MountKind.TMPFS))
+
+    # xdg-open
+    unjail_xdg = shutil.which("unjail-xdg-open")
+    unjail = shutil.which("unjail")
+    if (unjail_xdg is not None) and (unjail is not None):
+        mounts += [
+            Mount(Path(unjail_xdg), SANDBOX_BIN_DIR / "xdg-open", MountKind.BIND_RO),
+            Mount(Path(unjail), SANDBOX_BIN_DIR / "unjail", MountKind.BIND_RO),
+            Mount(XDG_RUNTIME_DIR / "unjaild/xdg-open", None, MountKind.BIND_RO),
+        ]
+
+    # build mount arguments, shortest target path first to avoid shadowing
+    mounts.sort(key=lambda m: (len(m.target.parts), m.target.parts))
+    dir_mounts = collections.defaultdict(list)
+    for mount in mounts:
+        target = mount.target
+        if mount.kind is MountKind.TMPFS:
+            if not target.is_dir():
+                continue
+            bwrap_args += ["--perms", "0700", "--tmpfs", str(target)]
+        elif mount.kind is MountKind.BIND_RO:
+            if not mount.src.exists():
+                continue
+            bwrap_args += ["--ro-bind", str(mount.src), str(target)]
+        elif mount.kind is MountKind.BIND_RW:
+            if not mount.src.exists():
+                # needed for agent dirs on first launch
+                mount.src.mkdir()
+            bwrap_args += ["--bind", str(mount.src), str(target)]
+        elif mount.kind is MountKind.OVERLAYFS:
+            if not mount.src.exists():
+                continue
+            bwrap_args += [
+                "--dir",
+                str(target),
+                "--overlay-src",
+                str(mount.src),
+                "--tmp-overlay",
+                str(target),
+            ]
+        if mount.src.is_dir():
+            dir_mounts[mount.kind].append(target)
+
+    # generated files
+    files = {
+        Path("/etc/group"): (gen_group(), "0400"),
+        Path("/etc/nsswitch.conf"): (
+            b"passwd: files\ngroup: files\nhosts: files dns\n",
+            "0400",
+        ),
+        Path("/etc/passwd"): (gen_passwd(), "0400"),
+        # add a small jujutsu wrapper that runs the next resolved jj with --ignore-working-copy (read-only)
+        SANDBOX_BIN_DIR / "jj": (
+            b'#!/bin/bash\nexec $(type -aP -- jj | uniq | tail -n +2 | head -n 1) --ignore-working-copy "$@"\n',
+            "0500",
+        ),
+    }
+    try:
+        global_agents_md_path = GLOBAL_AGENTS_MD[AGENT]
+    except KeyError:
+        pass
+    else:
+        global_agents_md_content = gen_global_agents_md(
+            exchange_dir,
+            has_unjaild=(unjail_xdg is not None) and (unjail is not None),
+            dir_mounts=dir_mounts,
+        )
+        if global_agents_md_content is not None:
+            files[global_agents_md_path] = (
+                global_agents_md_content,
+                "400",
+            )
+    if AGENT == "codex":
+        # avoid "do you trust this directory?" prompt
+        with (XDG_CONFIG_HOME / "codex/config.toml").open("rt") as f:
+            files[HOME / ".codex/config.toml"] = (
+                f'{f.read()}\n[projects."{CWD!s}"]\ntrust_level = "trusted"\n'.encode(),
+                "0400",
+            )
+    elif AGENT == "pi":
+        # pi needs to have persistent npm modules fo its extensions
+        files[HOME / ".npmrc"] = (
+            f"prefix={HOME / '.pi/agent/npm'!s}\n".encode(),
+            "0400",
+        )
+    for path, (data, perms) in files.items():
+        fd = memfd_data(data)
+        bwrap_args += [
+            "--perms",
+            perms,
+            "--ro-bind-data",
+            str(fd),
+            str(path),
+        ]
+
+    # symlinks
+    for target, link in (SYMLINKS | AGENT_SYMLINKS.get(AGENT, {})).items():
+        if target.exists():
+            bwrap_args += ["--symlink", str(target), str(link)]
+
+    # env
+    bwrap_args.append("--clearenv")
+    for env_k, env_v in ENV_SET.items():
+        bwrap_args += ["--setenv", env_k, env_v]
+    for env_k in ENV_FORWARD + [
+        k for k in os.environ if k.startswith(f"{AGENT.upper()}_")
+    ]:
+        env_v = os.environ.get(env_k)
+        if env_v is not None:
+            bwrap_args += ["--setenv", env_k, env_v]
+
+    bwrap_args += [
+        "--chdir",
+        str(CWD),
+        # "--new-session",
+        "--die-with-parent",
+        "--",
+        *(("bash",) if DEBUG else args),
+    ]
+
+    if DEBUG:
+        sys.stderr.write(shlex.join(bwrap_args) + "\n")
+    os.execv("/usr/bin/bwrap", bwrap_args)

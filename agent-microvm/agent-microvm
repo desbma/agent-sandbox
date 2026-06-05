@@ -1,0 +1,1193 @@
+#!/usr/bin/env python3
+"""Run disposable Alpine guests with QEMU microvm."""
+
+from __future__ import annotations
+
+# Host package dependencies (binaries this script invokes: qemu-system-x86_64,
+# virtiofsd, passt, ssh/ssh-keygen, cpio, mksquashfs/unsquashfs, python3).
+#   Arch Linux:
+#     pacman -S cpio openssh passt python qemu-system-x86 squashfs-tools virtiofsd
+#   Debian Trixie:
+#     apt install cpio openssh-client passt python3 qemu-system-x86 squashfs-tools virtiofsd
+import base64
+import contextlib
+import dataclasses
+import fcntl
+import ipaddress
+import logging
+import os
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sequence
+
+SCRIPT_NAME = Path(__file__).resolve().name
+LOGGER = logging.getLogger(SCRIPT_NAME)
+ALPINE_BRANCH = "v3.23"
+ALPINE_VERSION = "3.23.4"
+ALPINE_ARCH = "x86_64"
+ALPINE_CDN = "https://dl-cdn.alpinelinux.org/alpine"
+ALPINE_REPOSITORIES = ("main", "community")
+# Packages the host harness itself depends on: the guest sshd (dropbear),
+# the SSH login shell, and the terminfo database for native terminal rendering.
+HARNESS_PACKAGES = (
+    "bash",
+    "dropbear",
+    "ncurses-terminfo",
+)
+# Developer tooling made available to the coding agent inside the guest.
+AGENT_PACKAGES = (
+    "bind-tools",
+    "build-base",
+    "ca-certificates",
+    "cargo",
+    "coreutils",
+    "curl",
+    "diffutils",
+    "fd",
+    "file",
+    "findutils",
+    "gawk",
+    "gcc",
+    "git",
+    "grep",
+    "gzip",
+    "iproute2",
+    "iputils",
+    "jq",
+    "jujutsu",
+    "libffi-dev",
+    "linux-headers",
+    "netcat-openbsd",
+    "nodejs",
+    "npm",
+    "openssl",
+    "openssl-dev",
+    "pkgconf",
+    "procps-ng",
+    "python3",
+    "python3-dev",
+    "ripgrep",
+    "ruff",
+    "sed",
+    "shellcheck",
+    "sqlite",
+    "sqlite-dev",
+    "strace",
+    "sudo",
+    "tar",
+    "tree",
+    "typescript",
+    "unzip",
+    "uv",
+    "which",
+    "xz",
+    "xz-dev",
+    "zip",
+    "zlib-dev",
+    "zstd",
+)
+ALPINE_PACKAGES = tuple(sorted((*HARNESS_PACKAGES, *AGENT_PACKAGES)))
+ALPINE_RELEASE_BASE_URL = f"{ALPINE_CDN}/{ALPINE_BRANCH}/releases/{ALPINE_ARCH}"
+ALPINE_KERNEL_URL = f"{ALPINE_RELEASE_BASE_URL}/netboot/vmlinuz-virt"
+ALPINE_MODLOOP_URL = f"{ALPINE_RELEASE_BASE_URL}/netboot/modloop-virt"
+ALPINE_MINIROOTFS_URL = (
+    f"{ALPINE_RELEASE_BASE_URL}/alpine-minirootfs-{ALPINE_VERSION}-{ALPINE_ARCH}.tar.gz"
+)
+ALPINE_REPOSITORY_URLS = tuple(
+    f"{ALPINE_CDN}/{ALPINE_BRANCH}/{repository}" for repository in ALPINE_REPOSITORIES
+)
+GUEST_USER_NAME = "user"
+GUEST_USER_UID = 1000
+GUEST_USER_HOME = Path(f"/home/{GUEST_USER_NAME}")
+GUEST_USER_SSH_DIR = GUEST_USER_HOME / ".ssh"
+GUEST_AUTHORIZED_KEYS_PATH = GUEST_USER_SSH_DIR / "authorized_keys"
+GUEST_BASH_PROMPT = f"{SCRIPT_NAME}$ "
+GUEST_BASH_PROMPT_PATH = Path("etc/bash/prompt.sh")
+GUEST_SSH_TCP_PORT = 2222
+GUEST_READY_MARKER = f"{SCRIPT_NAME}: ready"
+GUEST_PUBKEY_CMDLINE_KEY = f"{SCRIPT_NAME}.pubkey"
+WORKSPACE_SHARE_TAG = "workspace"
+WORKSPACE_MOUNTPOINT = GUEST_USER_HOME / "workspace"
+EXCHANGE_SHARE_TAG = "exchange"
+EXCHANGE_DIR_NAME = "agent-microvm-exchange"
+HELP_FLAGS = ("-h", "--help")
+GUEST_USR_LOWER_MOUNTPOINT = Path("/mnt/usr-lower")
+GUEST_USR_OVERLAY_UPPER = Path("/run/usr-overlay/upper")
+GUEST_USR_OVERLAY_WORK = Path("/run/usr-overlay/work")
+SSH_KEY_TYPE = "ed25519"
+HOST_RESOLV_CONF = Path("/etc/resolv.conf")
+# Sentinel nameserver advertised to the guest; passt intercepts DNS sent to it
+# and forwards to the host resolver. RFC 5737 TEST-NET-1, so it never collides
+# with a real host subnet and the guest routes it to passt via the gateway.
+GUEST_DNS_FORWARD_ADDR = "192.0.2.53"
+# Public resolver advertised only when the host exposes no usable nameserver.
+GUEST_DNS_FALLBACK = "1.1.1.1"
+VIRTIOFS_NAMESPACE_ID = 0
+# virtiofsd ships outside PATH: /usr/lib on Arch, /usr/libexec and /usr/lib/qemu on Debian.
+VIRTIOFSD_SEARCH_DIRS = ("/usr/lib", "/usr/libexec", "/usr/lib/qemu")
+BYTES_PER_MIB = 1024 * 1024
+POLL_SECONDS = 0.05
+VIRTIOFSD_SOCKET_TIMEOUT_SECONDS = 3.0
+GUEST_READY_TIMEOUT_SECONDS = 30.0
+DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
+RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
+PREPARE_RECIPE_VERSION = 6
+ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+BOOT_TRACE_ENV_VAR = "BOOT_TRACE_SANDBOX_AGENT"
+HOST_TRACE_VIRTIOFSD_LAUNCHED = "host:virtiofsd-launched"
+HOST_TRACE_VIRTIOFSD_READY = "host:virtiofsd-ready"
+HOST_TRACE_QEMU_LAUNCHED = "host:qemu-launched"
+HOST_TRACE_GUEST_READY = "host:guest-ready"
+GUEST_TRACE_PREFIX = "boot-trace"
+GUEST_TRACE_LABEL_PREFIX = "guest:"
+GUEST_TRACE_FIELD_COUNT = 3
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class VirtiofsShare:
+    """Describe one host directory exported to the guest with virtio-fs."""
+
+    tag: str
+    source: Path
+    socket_path: Path
+    readonly: bool
+
+    @property
+    def chardev_id(self) -> str:
+        """Return the QEMU chardev identifier for this share."""
+        return f"char-{self.tag}"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MicrovmConfig:
+    """Describe a QEMU microvm session."""
+
+    kernel_path: Path
+    initramfs_path: Path
+    usr_squashfs_path: Path
+    passt_path: Path
+    dns_forward_target: str | None
+    memory_mib: int
+    cpu_count: int
+    shares: tuple[VirtiofsShare, ...]
+    ssh_host_port: int
+    ssh_public_key: str
+    console_log_path: Path
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class GuestArtifacts:
+    """Describe persistent boot artifacts prepared for the Alpine guest."""
+
+    kernel_path: Path
+    initramfs_path: Path
+    usr_squashfs_path: Path
+
+    @property
+    def prepare_marker_path(self) -> Path:
+        """Return the prepare recipe version marker path."""
+        return self.kernel_path.parent / "prepare-recipe-version"
+
+    @property
+    def lock_path(self) -> Path:
+        """Return the lock path serializing artifact preparation across processes."""
+        return self.kernel_path.parent / "prepare.lock"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RuntimePaths:
+    """Describe transient session paths."""
+
+    runtime_path: Path
+    workspace_socket_path: Path
+    exchange_socket_path: Path
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SshSession:
+    """Describe how the host connects to the guest sshd."""
+
+    private_key_path: Path
+    host_port: int
+    command: tuple[str, ...]
+    allocate_pty: bool
+    environment: tuple[tuple[str, str], ...]
+
+
+@dataclasses.dataclass(slots=True)
+class BootTrace:
+    """Collect host- and guest-side boot timestamps for later reporting."""
+
+    started_at: float = dataclasses.field(default_factory=time.monotonic)
+    host_events: list[tuple[str, float]] = dataclasses.field(default_factory=list)
+    qemu_offset: float | None = None
+
+    def mark(self, label: str) -> None:
+        """Record a host event with its offset from trace start."""
+        offset = time.monotonic() - self.started_at
+        self.host_events.append((label, offset))
+        if label == HOST_TRACE_QEMU_LAUNCHED:
+            self.qemu_offset = offset
+
+
+def xdg_directory(env_var: str, fallback: Path) -> Path:
+    """Resolve an XDG base directory from its env var, falling back to a default."""
+    configured_path = os.environ.get(env_var)
+    if configured_path is not None:
+        return Path(configured_path).expanduser().resolve()
+    return fallback.resolve()
+
+
+def exchange_dir() -> Path:
+    """Return the host directory shared at the same path on every guest."""
+    return (
+        xdg_directory("XDG_RUNTIME_DIR", Path(tempfile.gettempdir()))
+        / EXCHANGE_DIR_NAME
+    )
+
+
+def default_artifacts() -> GuestArtifacts:
+    """Return default Alpine artifact paths."""
+    cache_home = xdg_directory("XDG_CACHE_HOME", Path.home() / ".cache")
+    base_path = cache_home / SCRIPT_NAME / f"alpine-{ALPINE_BRANCH}"
+    return GuestArtifacts(
+        kernel_path=base_path / "vmlinuz-virt",
+        initramfs_path=base_path / "rootfs.cpio",
+        usr_squashfs_path=base_path / "usr.squashfs",
+    )
+
+
+def default_cpu_count() -> int:
+    """Return the host CPU count available to the guest."""
+    return len(os.sched_getaffinity(0))
+
+
+def default_memory_mib() -> int:
+    """Return guest memory derived from host physical memory."""
+    host_mib = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // BYTES_PER_MIB
+    return max(8 * 1024, host_mib // 4)
+
+
+def debug_enabled() -> bool:
+    """Return whether debug output is enabled."""
+    return "DEBUG_SANDBOX_AGENT" in os.environ
+
+
+def boot_trace_enabled() -> bool:
+    """Return whether the boot timing summary should be logged."""
+    return BOOT_TRACE_ENV_VAR in os.environ
+
+
+def parse_guest_trace(
+    console_log_path: Path, qemu_offset: float
+) -> list[tuple[str, float]]:
+    """Return guest trace events translated to host monotonic offsets."""
+    if not console_log_path.is_file():
+        return []
+    events: list[tuple[str, float]] = []
+    text = console_log_path.read_text(encoding="utf-8", errors="replace")
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != GUEST_TRACE_FIELD_COUNT or parts[0] != GUEST_TRACE_PREFIX:
+            continue
+        try:
+            uptime = float(parts[2])
+        except ValueError:
+            continue
+        events.append((f"{GUEST_TRACE_LABEL_PREFIX}{parts[1]}", qemu_offset + uptime))
+    return events
+
+
+def report_boot_trace(trace: BootTrace, console_log_path: Path) -> None:
+    """Log a sorted host+guest boot timing summary when enabled."""
+    if not boot_trace_enabled():
+        return
+    rows: list[tuple[str, float]] = list(trace.host_events)
+    if trace.qemu_offset is not None:
+        rows.extend(parse_guest_trace(console_log_path, trace.qemu_offset))
+    rows.sort(key=lambda event: event[1])
+    LOGGER.info("Boot trace:")
+    previous = 0.0
+    for label, offset in rows:
+        LOGGER.info("  %7.3fs  +%6.3fs  %s", offset, offset - previous, label)
+        previous = offset
+
+
+def configure_logging() -> None:
+    """Send progress logs to stderr, verbose under DEBUG_SANDBOX_AGENT."""
+    logging.basicConfig(
+        level=logging.DEBUG if debug_enabled() else logging.INFO,
+        stream=sys.stderr,
+        format=f"[{SCRIPT_NAME}] %(message)s",
+    )
+
+
+def verbose_subprocess_stdout() -> int:
+    """Return the stdout target for chatty subprocesses, discarded unless debugging."""
+    return sys.stderr.fileno() if debug_enabled() else subprocess.DEVNULL
+
+
+def write_alpine_repositories(tree: Path) -> None:
+    """Write Alpine package repositories into the rootfs."""
+    repositories_file = tree / "etc/apk/repositories"
+    repositories_file.parent.mkdir(parents=True, exist_ok=True)
+    repositories_file.write_text(
+        "\n".join(ALPINE_REPOSITORY_URLS) + "\n", encoding="utf-8"
+    )
+
+
+def run_quiet(command: Sequence[str]) -> None:
+    """Run a command to completion, streaming its output to stderr only under debug."""
+    subprocess.run(
+        command,
+        check=True,
+        stdout=verbose_subprocess_stdout(),
+        stderr=subprocess.STDOUT,
+    )
+
+
+def alpine_apk_command(tree: Path, arguments: Sequence[str]) -> list[str]:
+    """Build an apk command running against the rootfs."""
+    library_path = os.pathsep.join(str(tree / path) for path in ("lib", "usr/lib"))
+    return [
+        str(tree / "lib/ld-musl-x86_64.so.1"),
+        "--library-path",
+        library_path,
+        str(tree / "sbin/apk"),
+        "--root",
+        str(tree),
+        *arguments,
+    ]
+
+
+def run_alpine_apk(tree: Path, arguments: Sequence[str]) -> None:
+    """Run apk against the rootfs."""
+    run_quiet(alpine_apk_command(tree, arguments))
+
+
+def install_alpine_packages(tree: Path) -> None:
+    """Install configured Alpine packages into the rootfs."""
+    LOGGER.info("Installing Alpine packages")
+    write_alpine_repositories(tree)
+    run_alpine_apk(tree, ("update",))
+    run_alpine_apk(tree, ("add", "--usermode", "--initdb", *ALPINE_PACKAGES))
+    run_alpine_apk(tree, ("upgrade", "--available"))
+
+
+def download_file(url: str, destination: Path) -> None:
+    """Download a URL to a destination path."""
+    LOGGER.info("Downloading %s", url)
+    with urllib.request.urlopen(url) as response, destination.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def minirootfs_tar_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
+    """Sanitize a minirootfs tar member, dropping device and special files.
+
+    The guest mounts devtmpfs, so special files are recreated at boot and need
+    not (and rootless, cannot) be extracted. tar_filter keeps absolute symlinks,
+    which busybox applets rely on.
+    """
+    if member.isdev():
+        return None
+    return tarfile.tar_filter(member, path)
+
+
+def extract_minirootfs(archive_path: Path, tree: Path) -> None:
+    """Extract an Alpine minirootfs tarball into the rootfs tree."""
+    LOGGER.info("Extracting Alpine root filesystem")
+    with tarfile.open(archive_path) as archive:
+        archive.extractall(tree, filter=minirootfs_tar_filter)
+
+
+def extract_modloop(modloop_path: Path, tree: Path) -> None:
+    """Extract Alpine kernel modules from the module loop into the rootfs tree."""
+    LOGGER.info("Extracting kernel modules")
+    run_quiet(("unsquashfs", "-f", "-d", str(tree / "lib"), str(modloop_path)))
+
+
+def set_guest_root_shell(tree: Path) -> None:
+    """Set the guest root account login shell so SSH sessions land in bash."""
+    passwd_path = tree / "etc/passwd"
+    lines = [
+        ":".join((*line.split(":")[:-1], "/bin/bash"))
+        if line.startswith("root:")
+        else line
+        for line in passwd_path.read_text(encoding="utf-8").splitlines()
+    ]
+    passwd_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def append_guest_account(tree: Path) -> None:
+    """Append the unprivileged user to the rootfs passwd, group, and shadow databases."""
+    entries = {
+        "etc/passwd": (
+            f"{GUEST_USER_NAME}:x:{GUEST_USER_UID}:{GUEST_USER_UID}:"
+            f"{GUEST_USER_NAME}:{GUEST_USER_HOME}:/bin/bash\n"
+        ),
+        "etc/group": f"{GUEST_USER_NAME}:x:{GUEST_USER_UID}:\n",
+        "etc/shadow": f"{GUEST_USER_NAME}:!::0:::::\n",
+    }
+    for relative_path, line in entries.items():
+        with (tree / relative_path).open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+
+def install_guest_bash_prompt(tree: Path) -> None:
+    """Write a /etc/bash drop-in that pins the interactive bash PS1."""
+    prompt_path = tree / GUEST_BASH_PROMPT_PATH
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(f"PS1={shlex.quote(GUEST_BASH_PROMPT)}\n", encoding="utf-8")
+    prompt_path.chmod(0o644)
+
+
+def write_guest_sudoers(tree: Path) -> None:
+    """Write the passwordless sudo drop-in for the unprivileged user."""
+    sudoers_path = tree / "etc/sudoers.d" / GUEST_USER_NAME
+    sudoers_path.parent.mkdir(parents=True, exist_ok=True)
+    sudoers_path.write_text(
+        f"{GUEST_USER_NAME} ALL=(ALL) NOPASSWD: ALL\n", encoding="utf-8"
+    )
+    sudoers_path.chmod(0o440)
+
+
+def guest_init_script() -> str:
+    """Return the shell init script run as PID 1 inside the Alpine guest."""
+    exchange_mountpoint = exchange_dir()
+    return f"""#!/bin/sh
+set -u
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Pre-/usr-mount, coreutils replacements in /bin (mkdir, ln, cut, ...) cannot
+# load their libs from /usr/lib yet. Invoke busybox applets directly.
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+busybox mkdir -p /dev/pts /run /tmp {GUEST_USR_LOWER_MOUNTPOINT} {WORKSPACE_MOUNTPOINT}
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+busybox mkdir -p {GUEST_USR_OVERLAY_UPPER} {GUEST_USR_OVERLAY_WORK}
+[ -e /dev/ptmx ] || busybox ln -s /dev/pts/ptmx /dev/ptmx
+
+exec </dev/console >/dev/console 2>&1
+
+boot_trace() {{
+    read uptime _rest < /proc/uptime
+    printf "{GUEST_TRACE_PREFIX} %s %s\\n" "$1" "$uptime"
+}}
+boot_trace mounts-ready
+
+modprobe virtio_mmio || true
+modprobe virtio_blk || true
+modprobe squashfs || true
+modprobe overlay || true
+mount -t squashfs -o ro /dev/vda {GUEST_USR_LOWER_MOUNTPOINT}
+mount -t overlay overlay \\
+    -o lowerdir={GUEST_USR_LOWER_MOUNTPOINT},upperdir={GUEST_USR_OVERLAY_UPPER},workdir={GUEST_USR_OVERLAY_WORK} \\
+    /usr
+boot_trace usr-ready
+
+modprobe virtiofs || true
+if mount -t virtiofs {WORKSPACE_SHARE_TAG} {WORKSPACE_MOUNTPOINT}; then
+    echo "{SCRIPT_NAME}: workspace mounted at {WORKSPACE_MOUNTPOINT}"
+else
+    echo "{SCRIPT_NAME}: WARNING workspace mount failed"
+fi
+mkdir -p {exchange_mountpoint}
+if mount -t virtiofs {EXCHANGE_SHARE_TAG} {exchange_mountpoint}; then
+    echo "{SCRIPT_NAME}: exchange mounted at {exchange_mountpoint}"
+else
+    echo "{SCRIPT_NAME}: WARNING exchange mount failed"
+fi
+chmod 755 {GUEST_USER_HOME}
+chown {GUEST_USER_NAME}:{GUEST_USER_NAME} {GUEST_USER_HOME}
+boot_trace workspace-ready
+
+# Rootless apk --usermode cannot set setuid; restore it for sudo as real root.
+chmod u+s /usr/bin/sudo
+
+modprobe virtio_net || true
+ifconfig eth0 up
+if udhcpc -i eth0 -n -q -t 5 -T 1; then
+    echo "{SCRIPT_NAME}: network up on eth0"
+else
+    echo "{SCRIPT_NAME}: WARNING network setup failed on eth0"
+fi
+
+# Allow the unprivileged user ICMP/ICMPv6 echo (ping) sockets so ping needn't a
+# raw socket (CAP_NET_RAW); one ipv4 knob governs both. passt forwards the echo.
+echo '0 2147483647' > /proc/sys/net/ipv4/ping_group_range
+boot_trace network-ready
+
+pubkey_b64=""
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        {GUEST_PUBKEY_CMDLINE_KEY}=*)
+            pubkey_b64="${{arg#{GUEST_PUBKEY_CMDLINE_KEY}=}}"
+            ;;
+    esac
+done
+mkdir -p /etc/dropbear {GUEST_USER_SSH_DIR}
+printf '%s' "$pubkey_b64" | base64 -d > {GUEST_AUTHORIZED_KEYS_PATH}
+chmod 700 {GUEST_USER_SSH_DIR}
+chmod 600 {GUEST_AUTHORIZED_KEYS_PATH}
+chown -R {GUEST_USER_NAME}:{GUEST_USER_NAME} {GUEST_USER_SSH_DIR}
+dropbearkey -t {SSH_KEY_TYPE} -f /etc/dropbear/ed25519_host_key >/dev/console 2>&1
+boot_trace host-key-ready
+
+ifconfig lo 127.0.0.1 netmask 255.0.0.0 up
+dropbear -F -E -s -r /etc/dropbear/ed25519_host_key -p {GUEST_SSH_TCP_PORT} 2>/dev/console &
+boot_trace dropbear-launched
+echo "{GUEST_READY_MARKER}"
+wait
+poweroff -f
+"""
+
+
+def pack_directory_initramfs(tree: Path) -> bytes:
+    """Pack a rootfs directory tree into one uncompressed newc cpio archive.
+
+    Members are listed parents before children with deterministic mtimes.
+    """
+    LOGGER.info("Building guest initramfs")
+    names: list[str] = []
+    for directory, dirnames, filenames in tree.walk(follow_symlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        for name in (*dirnames, *filenames):
+            path = directory / name
+            if not (path.is_symlink() or path.is_file() or path.is_dir()):
+                raise ValueError(f"Unsupported file type in rootfs tree: {path}")
+            os.utime(path, (0, 0), follow_symlinks=False)
+            names.append(path.relative_to(tree).as_posix())
+    result = subprocess.run(
+        (
+            "cpio",
+            "--create",
+            "--format=newc",
+            "--owner=0:0",
+            "--reproducible",
+            "--quiet",
+            "--null",
+        ),
+        cwd=tree,
+        input=b"".join(name.encode("utf-8") + b"\0" for name in names),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return result.stdout
+
+
+def ensure_artifacts(artifacts: GuestArtifacts) -> None:
+    """Prepare guest artifacts when the cached set is missing or stale.
+
+    The build runs under an exclusive lock, with a second freshness check once
+    held, so racing sessions never regenerate the rootfs in parallel.
+    """
+    if artifacts_are_current(artifacts):
+        return
+    with artifact_build_lock(artifacts):
+        if not artifacts_are_current(artifacts):
+            prepare_guest(artifacts)
+
+
+@contextlib.contextmanager
+def artifact_build_lock(artifacts: GuestArtifacts) -> Iterator[None]:
+    """Hold an exclusive lock serializing artifact preparation across processes."""
+    lock_path = artifacts.lock_path
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def prepare_guest(artifacts: GuestArtifacts) -> None:
+    """Download Alpine artifacts, build the boot initramfs and the /usr squashfs."""
+    artifact_dir = artifacts.kernel_path.parent
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    kernel_staging = staging_path(artifacts.kernel_path)
+    initramfs_staging = staging_path(artifacts.initramfs_path)
+    usr_squashfs_staging = staging_path(artifacts.usr_squashfs_path)
+    download_file(ALPINE_KERNEL_URL, kernel_staging)
+    with tempfile.TemporaryDirectory(prefix=RUNTIME_PREFIX) as build_dir:
+        build_path = Path(build_dir)
+        rootfs_archive = build_path / "minirootfs.tar.gz"
+        modloop_path = build_path / "modloop"
+        tree = build_path / "tree"
+        tree.mkdir()
+        download_file(ALPINE_MINIROOTFS_URL, rootfs_archive)
+        download_file(ALPINE_MODLOOP_URL, modloop_path)
+        extract_minirootfs(rootfs_archive, tree)
+        install_alpine_packages(tree)
+        extract_modloop(modloop_path, tree)
+        set_guest_root_shell(tree)
+        append_guest_account(tree)
+        write_guest_sudoers(tree)
+        install_guest_bash_prompt(tree)
+        init_path = tree / "init"
+        init_path.write_text(guest_init_script(), encoding="utf-8")
+        init_path.chmod(0o755)
+        usr_tree = build_path / "usr-tree"
+        (tree / "usr").rename(usr_tree)
+        (tree / "usr").mkdir()
+        initramfs_staging.write_bytes(pack_directory_initramfs(tree))
+        build_usr_squashfs(usr_tree, usr_squashfs_staging)
+    publish_guest_artifacts(
+        artifacts, kernel_staging, initramfs_staging, usr_squashfs_staging
+    )
+
+
+def staging_path(final_path: Path) -> Path:
+    """Return the sibling staging path an artifact is built at before publishing."""
+    return final_path.with_name(f"{final_path.name}.new")
+
+
+def publish_guest_artifacts(
+    artifacts: GuestArtifacts,
+    kernel_staging: Path,
+    initramfs_staging: Path,
+    usr_squashfs_staging: Path,
+) -> None:
+    """Atomically move staged artifacts into place, marking the recipe version last.
+
+    The marker is dropped before publishing and rewritten only once every file
+    is in place, so an interrupted build never leaves a marked, mixed rootfs. The
+    renames keep any file descriptor a running guest already holds pointing at its
+    previous inode.
+    """
+    artifacts.prepare_marker_path.unlink(missing_ok=True)
+    kernel_staging.replace(artifacts.kernel_path)
+    initramfs_staging.replace(artifacts.initramfs_path)
+    usr_squashfs_staging.replace(artifacts.usr_squashfs_path)
+    artifacts.prepare_marker_path.write_text(
+        f"{PREPARE_RECIPE_VERSION}\n", encoding="utf-8"
+    )
+
+
+def build_usr_squashfs(usr_tree: Path, output_path: Path) -> None:
+    """Pack the /usr subtree into a read-only zstd squashfs image."""
+    LOGGER.info("Building /usr squashfs")
+    output_path.unlink(missing_ok=True)
+    run_quiet(
+        (
+            "mksquashfs",
+            str(usr_tree),
+            str(output_path),
+            "-comp",
+            "zstd",
+            "-all-root",
+            "-noappend",
+            "-no-progress",
+            "-quiet",
+        )
+    )
+
+
+def build_qemu_command(config: MicrovmConfig) -> list[str]:
+    """Build the QEMU command line for a microvm session."""
+    command = [
+        "qemu-system-x86_64",
+        "-M",
+        "microvm,accel=kvm,memory-backend=mem",
+        "-cpu",
+        "host",
+        "-smp",
+        str(config.cpu_count),
+        "-m",
+        f"{config.memory_mib}M",
+        "-object",
+        f"memory-backend-memfd,id=mem,size={config.memory_mib}M,share=on",
+        "-nodefaults",
+        "-no-user-config",
+        "-no-reboot",
+        "-nographic",
+        "-monitor",
+        "none",
+        "-serial",
+        f"file:{config.console_log_path}",
+        "-kernel",
+        str(config.kernel_path),
+        "-initrd",
+        str(config.initramfs_path),
+        "-append",
+        qemu_kernel_cmdline(config.ssh_public_key),
+        "-drive",
+        f"file={config.usr_squashfs_path},if=none,id=usr,format=raw,readonly=on",
+        "-device",
+        "virtio-blk-device,drive=usr",
+    ]
+    command.extend(
+        qemu_passt_args(
+            config.passt_path, config.ssh_host_port, config.dns_forward_target
+        )
+    )
+    for share in config.shares:
+        command.extend(qemu_virtiofs_args(share))
+    return command
+
+
+def qemu_kernel_cmdline(public_key: str) -> str:
+    """Build the kernel cmdline string carrying the base64 SSH public key."""
+    encoded_key = base64.b64encode(public_key.encode("utf-8")).decode("ascii")
+    return f"console=ttyS0 {GUEST_PUBKEY_CMDLINE_KEY}={encoded_key}"
+
+
+def qemu_passt_args(
+    passt_path: Path, ssh_host_port: int, dns_forward_target: str | None
+) -> list[str]:
+    """Build QEMU arguments for WAN access, the SSH forward, and guest DNS via passt."""
+    forward = f"127.0.0.1/{ssh_host_port}:{GUEST_SSH_TCP_PORT}"
+    netdev = f"passt,id=net0,path={passt_path},quiet=on,tcp-ports={forward}"
+    if dns_forward_target is None:
+        netdev += f",dns={GUEST_DNS_FALLBACK}"
+    else:
+        netdev += (
+            f",dns={GUEST_DNS_FORWARD_ADDR}"
+            f",dns-forward={GUEST_DNS_FORWARD_ADDR}"
+            f",dns-host={dns_forward_target}"
+        )
+    return [
+        "-netdev",
+        netdev,
+        "-device",
+        "virtio-net-device,netdev=net0",
+    ]
+
+
+def qemu_virtiofs_args(share: VirtiofsShare) -> list[str]:
+    """Build QEMU arguments for one virtio-fs device on the mmio transport."""
+    return [
+        "-chardev",
+        f"socket,id={share.chardev_id},path={share.socket_path}",
+        "-device",
+        f"vhost-user-fs-device,chardev={share.chardev_id},tag={share.tag}",
+    ]
+
+
+def generate_ssh_keypair(runtime_path: Path) -> tuple[Path, str]:
+    """Generate an ephemeral ed25519 keypair, returning the private key path and public key."""
+    private_key_path = runtime_path / "id_ed25519"
+    subprocess.run(
+        ("ssh-keygen", "-t", SSH_KEY_TYPE, "-N", "", "-f", str(private_key_path), "-q"),
+        check=True,
+    )
+    public_key = (
+        private_key_path.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    )
+    return private_key_path, public_key
+
+
+def forwarded_environment() -> tuple[tuple[str, str], ...]:
+    """Collect locale environment variables to forward into the guest session."""
+    locale_vars = ("LANG", "LC_ALL", "LC_CTYPE")
+    return tuple((name, os.environ[name]) for name in locale_vars if name in os.environ)
+
+
+def build_remote_command(
+    command: Sequence[str], environment: Sequence[tuple[str, str]]
+) -> str:
+    """Build the remote shell command the guest sshd runs for a session."""
+    parts = []
+    if command:
+        parts.append(". /etc/profile")
+    parts.append(f"cd {shlex.quote(str(GUEST_USER_HOME))} 2>/dev/null || cd")
+    parts.extend(f"export {name}={shlex.quote(value)}" for name, value in environment)
+    if command:
+        parts.append(f"exec {shlex.join(command)}")
+    else:
+        parts.append("exec /bin/bash -l")
+    return "; ".join(parts)
+
+
+def build_ssh_command(session: SshSession) -> list[str]:
+    """Build the ssh client command connecting to the guest over the relay."""
+    command = [
+        "ssh",
+        "-F",
+        "none",
+        "-i",
+        str(session.private_key_path),
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        "-p",
+        str(session.host_port),
+    ]
+    if session.allocate_pty:
+        command.append("-t")
+    command.append(f"{GUEST_USER_NAME}@127.0.0.1")
+    command.append(build_remote_command(session.command, session.environment))
+    return command
+
+
+def build_virtiofsd_command(
+    virtiofsd_path: Path,
+    share: VirtiofsShare,
+    host_uid: int,
+    host_gid: int,
+) -> list[str]:
+    """Build a rootless Rust virtiofsd command for one share."""
+    command = [
+        str(virtiofsd_path),
+        "--shared-dir",
+        str(share.source),
+        "--socket-path",
+        str(share.socket_path),
+        "--sandbox=namespace",
+        "--inode-file-handles=never",
+        f"--uid-map=:{VIRTIOFS_NAMESPACE_ID}:{host_uid}:1:",
+        f"--gid-map=:{VIRTIOFS_NAMESPACE_ID}:{host_gid}:1:",
+        f"--translate-uid=map:{GUEST_USER_UID}:{VIRTIOFS_NAMESPACE_ID}:1",
+        f"--translate-gid=map:{GUEST_USER_UID}:{VIRTIOFS_NAMESPACE_ID}:1",
+    ]
+    if share.readonly:
+        command.append("--readonly")
+    return command
+
+
+def resolve_executable(name: str) -> Path:
+    """Resolve an executable from PATH, extended with virtiofsd's off-PATH dirs."""
+    path = os.pathsep.join((os.environ.get("PATH", os.defpath), *VIRTIOFSD_SEARCH_DIRS))
+    resolved = shutil.which(name, path=path)
+    if resolved is None:
+        raise FileNotFoundError(f"Unable to find executable: {name}")
+    return Path(resolved)
+
+
+def create_runtime_paths() -> RuntimePaths:
+    """Create a transient directory for one VM session."""
+    parent = xdg_directory("XDG_RUNTIME_DIR", Path(tempfile.gettempdir()))
+    parent.mkdir(parents=True, exist_ok=True)
+    runtime_path = Path(tempfile.mkdtemp(prefix=RUNTIME_PREFIX, dir=parent)).resolve()
+    return RuntimePaths(
+        runtime_path=runtime_path,
+        workspace_socket_path=runtime_path / f"{WORKSPACE_SHARE_TAG}.sock",
+        exchange_socket_path=runtime_path / f"{EXCHANGE_SHARE_TAG}.sock",
+    )
+
+
+def find_free_tcp_port() -> int:
+    """Return an unused TCP port on the SSH forward address."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def host_dns_server() -> str | None:
+    """Return the first IPv4 nameserver from the host resolver config, if any."""
+    try:
+        text = HOST_RESOLV_CONF.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "nameserver":
+            continue
+        for candidate in fields[1:]:
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if isinstance(address, ipaddress.IPv4Address):
+                return candidate
+    return None
+
+
+def build_run_microvm_config(  # noqa: PLR0913
+    artifacts: GuestArtifacts,
+    workspace_path: Path,
+    runtime_paths: RuntimePaths,
+    passt_path: Path,
+    public_key: str,
+    ssh_host_port: int,
+) -> MicrovmConfig:
+    """Build the QEMU configuration for a run request."""
+    workspace_share = VirtiofsShare(
+        tag=WORKSPACE_SHARE_TAG,
+        source=workspace_path,
+        socket_path=runtime_paths.workspace_socket_path,
+        readonly=False,
+    )
+    exchange_source = exchange_dir()
+    exchange_source.mkdir(parents=True, exist_ok=True)
+    exchange_share = VirtiofsShare(
+        tag=EXCHANGE_SHARE_TAG,
+        source=exchange_source,
+        socket_path=runtime_paths.exchange_socket_path,
+        readonly=False,
+    )
+    dns_forward_target = host_dns_server()
+    if dns_forward_target is None:
+        LOGGER.warning(
+            "No host nameserver found; guest DNS falls back to %s", GUEST_DNS_FALLBACK
+        )
+    return MicrovmConfig(
+        kernel_path=artifacts.kernel_path,
+        initramfs_path=artifacts.initramfs_path,
+        usr_squashfs_path=artifacts.usr_squashfs_path,
+        passt_path=passt_path,
+        dns_forward_target=dns_forward_target,
+        memory_mib=default_memory_mib(),
+        cpu_count=default_cpu_count(),
+        shares=(workspace_share, exchange_share),
+        ssh_host_port=ssh_host_port,
+        ssh_public_key=public_key,
+        console_log_path=runtime_paths.runtime_path / "console.log",
+    )
+
+
+def run_microvm(command: Sequence[str]) -> int:
+    """Run a disposable QEMU microvm session."""
+    artifacts = default_artifacts()
+    workspace_path = Path.cwd().resolve()
+    ensure_artifacts(artifacts)
+    runtime_paths = create_runtime_paths()
+    try:
+        passt_path = resolve_executable("passt")
+        ssh_host_port = find_free_tcp_port()
+        private_key_path, public_key = generate_ssh_keypair(runtime_paths.runtime_path)
+        microvm_config = build_run_microvm_config(
+            artifacts,
+            workspace_path,
+            runtime_paths,
+            passt_path,
+            public_key,
+            ssh_host_port,
+        )
+        qemu_command = build_qemu_command(microvm_config)
+        virtiofsd_path = resolve_executable("virtiofsd")
+        virtiofsd_commands = tuple(
+            build_virtiofsd_command(
+                virtiofsd_path=virtiofsd_path,
+                share=share,
+                host_uid=os.getuid(),
+                host_gid=os.getgid(),
+            )
+            for share in microvm_config.shares
+        )
+        ssh_command = build_ssh_command(
+            SshSession(
+                private_key_path=private_key_path,
+                host_port=ssh_host_port,
+                command=tuple(command),
+                allocate_pty=sys.stdin.isatty(),
+                environment=forwarded_environment(),
+            )
+        )
+        LOGGER.info("Booting VM")
+        if debug_enabled():
+            print_commands((*virtiofsd_commands, qemu_command, ssh_command))
+        return run_processes(
+            virtiofsd_commands=virtiofsd_commands,
+            qemu_command=qemu_command,
+            ssh_command=ssh_command,
+            config=microvm_config,
+            trace=BootTrace(),
+        )
+    finally:
+        shutil.rmtree(runtime_paths.runtime_path)
+
+
+def artifacts_are_current(artifacts: GuestArtifacts) -> bool:
+    """Return whether guest artifacts match the current recipe and rebuild interval."""
+    marker = artifacts.prepare_marker_path
+    files = (
+        artifacts.kernel_path,
+        artifacts.initramfs_path,
+        artifacts.usr_squashfs_path,
+        marker,
+    )
+    if not all(path.is_file() for path in files):
+        return False
+    if marker.read_text(encoding="utf-8").strip() != str(PREPARE_RECIPE_VERSION):
+        return False
+    return time.time() - marker.stat().st_mtime <= ROOTFS_STATE_MAX_AGE_SECONDS
+
+
+def print_commands(commands: Sequence[Sequence[str]]) -> None:
+    """Print shell-escaped commands."""
+    for command in commands:
+        print(shlex.join(command), file=sys.stderr)
+
+
+def run_processes(
+    virtiofsd_commands: Sequence[Sequence[str]],
+    qemu_command: Sequence[str],
+    ssh_command: Sequence[str],
+    config: MicrovmConfig,
+    trace: BootTrace,
+) -> int:
+    """Run the backends and QEMU, drive the foreground ssh session, then clean up."""
+    console_log_path = config.console_log_path
+    socket_paths = [share.socket_path for share in config.shares]
+    virtiofsd_processes: list[subprocess.Popen[bytes]] = []
+    try:
+        virtiofsd_processes.extend(
+            subprocess.Popen(
+                command,
+                stdout=verbose_subprocess_stdout(),
+                stderr=subprocess.STDOUT,
+            )
+            for command in virtiofsd_commands
+        )
+        trace.mark(HOST_TRACE_VIRTIOFSD_LAUNCHED)
+        wait_for_virtiofsd(virtiofsd_processes, socket_paths)
+        trace.mark(HOST_TRACE_VIRTIOFSD_READY)
+        with console_log_path.open("wb") as console_log:
+            qemu_process = subprocess.Popen(
+                qemu_command, stdout=console_log, stderr=subprocess.STDOUT
+            )
+            trace.mark(HOST_TRACE_QEMU_LAUNCHED)
+            try:
+                wait_for_guest_ready(qemu_process, console_log_path)
+                trace.mark(HOST_TRACE_GUEST_READY)
+                return run_ssh_session(ssh_command)
+            finally:
+                terminate_process(qemu_process)
+    finally:
+        for process in virtiofsd_processes:
+            terminate_process(process)
+        if debug_enabled():
+            report_console_log(console_log_path)
+        report_boot_trace(trace, console_log_path)
+
+
+def run_ssh_session(ssh_command: Sequence[str]) -> int:
+    """Run the foreground ssh client, returning its exit status."""
+    ssh_process = subprocess.Popen(ssh_command)
+    try:
+        return ssh_process.wait()
+    except KeyboardInterrupt:
+        return signal.SIGINT.value
+    finally:
+        terminate_process(ssh_process)
+
+
+def report_console_log(console_log_path: Path) -> None:
+    """Print the captured guest console log to stderr."""
+    if console_log_path.is_file():
+        print(
+            console_log_path.read_text(encoding="utf-8", errors="replace"),
+            file=sys.stderr,
+        )
+
+
+def poll_until(timeout_seconds: float, ready: Callable[[], bool], message: str) -> None:
+    """Poll ready() until it returns true, raising TimeoutError past the deadline."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if ready():
+            return
+        time.sleep(POLL_SECONDS)
+    raise TimeoutError(message)
+
+
+def ensure_processes_alive(
+    processes: Sequence[subprocess.Popen[bytes]], message: str
+) -> None:
+    """Raise RuntimeError if any of the processes has already exited."""
+    if any(process.poll() is not None for process in processes):
+        raise RuntimeError(message)
+
+
+def wait_for_virtiofsd(
+    processes: Sequence[subprocess.Popen[bytes]],
+    socket_paths: Sequence[Path],
+) -> None:
+    """Wait until virtiofsd sockets are ready for QEMU."""
+
+    def ready() -> bool:
+        """Report whether every socket exists, raising if a backend exited early."""
+        ensure_processes_alive(processes, "virtiofsd exited before QEMU started")
+        return all(socket_path.exists() for socket_path in socket_paths)
+
+    poll_until(
+        VIRTIOFSD_SOCKET_TIMEOUT_SECONDS,
+        ready,
+        "Timed out waiting for virtiofsd sockets",
+    )
+
+
+def wait_for_guest_ready(
+    qemu_process: subprocess.Popen[bytes], console_log_path: Path
+) -> None:
+    """Wait until the guest sshd is listening, announced by the ready marker.
+
+    The host must not connect before dropbear binds its port, or the passt
+    forward would reset the connection mid-handshake (which ssh does not retry).
+    """
+
+    def ready() -> bool:
+        """Report whether the ready marker appeared, raising if QEMU exited early."""
+        ensure_processes_alive(
+            (qemu_process,), "QEMU exited before the guest became ready"
+        )
+        return console_log_path.is_file() and (
+            GUEST_READY_MARKER
+            in console_log_path.read_text(encoding="utf-8", errors="replace")
+        )
+
+    poll_until(
+        GUEST_READY_TIMEOUT_SECONDS,
+        ready,
+        "Timed out waiting for the guest to become ready",
+    )
+
+
+def terminate_process(process: subprocess.Popen[bytes]) -> None:
+    """Terminate a child process if it is still running."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=DEFAULT_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def usage() -> str:
+    """Return the command-line usage text with resolved share paths."""
+    return f"""\
+Usage: {SCRIPT_NAME} [COMMAND [ARG...]]
+
+Boot a fresh, throwaway Alpine microVM, run COMMAND inside it and exit, or open
+an interactive bash shell when no COMMAND is given. The guest has root through
+passwordless sudo and is discarded when the session ends.
+
+The current directory is shared read-write at {WORKSPACE_MOUNTPOINT}.
+The exchange directory {exchange_dir()} is shared at the same path on host and
+guest and persists across VMs.
+"""
+
+
+def main() -> int:
+    """Run the command line interface."""
+    arguments = sys.argv[1:]
+    if arguments and arguments[0] in HELP_FLAGS:
+        print(usage(), end="")
+        return 0
+    configure_logging()
+    return run_microvm(arguments)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

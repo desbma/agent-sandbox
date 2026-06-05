@@ -53,8 +53,8 @@ AGENT = Path(sys.argv[1]).name
 DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
 
 
-def detect_repo_root() -> Path | None:
-    """Root of the jj or git repo containing the cwd, first match wins."""
+def get_repo_root() -> Path | None:
+    """Get root of the jj or git repo containing the cwd, first match wins."""
     for cmd in [["jj", "root"], ["git", "rev-parse", "--show-toplevel"]]:
         try:
             out = subprocess.run(
@@ -69,6 +69,22 @@ def detect_repo_root() -> Path | None:
             continue
         return Path(out.stdout.strip())
     return None
+
+
+def get_jj_default_ws_root() -> Path | None:
+    """Get root of jj default workspace."""
+    try:
+        out = subprocess.run(
+            ["jj", "workspace", "root", "--name", "default"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return Path(out.stdout.strip())
 
 
 def fatal_error(msg: str) -> None:
@@ -102,7 +118,7 @@ def prompt_bool(msg: str, *, default: bool = False) -> bool:
 def confirm_cwd() -> Path:
     """Confirm startup directory if needed."""
     cwd = Path.cwd()
-    repo_root = detect_repo_root()
+    repo_root = get_repo_root()
     if (
         (repo_root is not None)
         and (repo_root != cwd)
@@ -400,6 +416,12 @@ if __name__ == "__main__":
 
     # static mounts
     mounts = list(MOUNTS) + AGENT_MOUNTS.get(AGENT, [])
+
+    # jujutsu default workspace
+    jj_default_ws_root = get_jj_default_ws_root()
+    if (jj_default_ws_root is not None) and not CWD.is_relative_to(jj_default_ws_root):
+        for subdir in [".jj", ".git"]:
+            mounts.append(Mount(jj_default_ws_root / subdir, None, MountKind.BIND_RO))
 
     # bind target binary
     agent_bin = shutil.which(sys.argv[1])

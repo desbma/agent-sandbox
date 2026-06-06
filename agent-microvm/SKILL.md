@@ -1,30 +1,47 @@
 ---
 name: agent-microvm
-description: Run privileged or destructive actions in a disposable, root-capable Alpine microVM via the `agent-microvm` command. Use when a task needs real root (mounting filesystem or disk images, loop devices, low-level networking, raw sockets, privileged services) or system packages with no uv/cargo/npm equivalent. Everything stays contained inside the VM (itself inside the bwrap sandbox) and is discarded on exit, so it cannot affect the host.
+description: Runs privileged, risky, OS-level, or system-dependent work in a disposable Alpine microVM. Use proactively when the normal sandbox may lack root, kernel features, services, network capabilities, or OS packages; prefer uv, cargo binstall/cargo install, npm, or npx outside the VM for normal user-level tool installs.
 ---
 
 # agent-microvm
 
 `agent-microvm` boots a throwaway Alpine Linux microVM, runs your command in it, and destroys it on exit. Inside the guest you are an unprivileged user with **passwordless `sudo`**, so you get real root without touching the host.
 
+## Installation preference
+
+Prefer normal sandbox, user-level package managers for ordinary tools and project dependencies when they fit the task:
+
+- Python: `uv`, `uvx`, `uv tool run`, `uv tool install`.
+- Rust: `cargo binstall`, then `cargo install`.
+- Node.js: `npm`, `npx`, project-local package scripts.
+- Other project-local package managers already used by the repository.
+
+Use these outside the VM when they are likely to work without root and without mutating system paths. This keeps normal development and project verification close to the user's workspace environment.
+
+Use the microVM instead when the task needs OS packages, native system libraries, privileged operations, system services, kernel/network features, mounts, risky/destructive commands, or tools that are awkward to install cleanly in the normal sandbox.
+
 ## When to use it
 
-Reach for the microVM when the task needs privileges the normal sandbox denies:
+Use the microVM whenever it is the faster, safer, or more reliable path to the task. You do not need the user to explicitly ask for it.
 
-- Mounting filesystem or disk images, loop devices, LVM, LUKS.
-- Low-level networking: network namespaces, `tun`/`tap`, raw sockets, packet capture, firewall rules.
-- Running privileged services or daemons.
-- Installing OS-level system packages (via `apk`) that have no `uv`/`cargo`/`npm` equivalent.
-- Running anything risky or destructive and having it vanish cleanly afterwards.
+Reach for it early when:
 
-Everything is doubly contained — the microVM runs inside the bwrap sandbox — so even `sudo rm -rf /` inside the guest **cannot affect the host**. Boot takes <3s, so use it freely; you can also run several VMs at once.
+- The normal sandbox might lack privileges, devices, kernel features, system services, or writable system paths.
+- The task involves mounting filesystem or disk images, loop devices, LVM, LUKS, network namespaces, `tun`/`tap`, raw sockets, packet capture, firewall rules, or privileged daemons.
+- The task may need OS packages, native system libraries, or tools that are not cleanly available through normal user-level package managers.
+- Installing tools in the normal sandbox would be noisy, awkward, impossible, or likely to leave unwanted state.
+- The command is risky, destructive, or benefits from a disposable environment.
+- You would otherwise spend time checking whether system tools are installed or inventing inferior substitutes; in the VM, install the intended `apk` package and run it.
+
+Everything is doubly contained — the microVM runs inside the bwrap sandbox — so even `sudo rm -rf /` inside the guest **cannot affect the host**. Boot takes <3s, so prefer it over elaborate sandbox workarounds; you can also run several VMs at once.
 
 ## When not to use it
 
-- The dependency installs fine in the normal environment (`uv`, `cargo`, `npm`). Prefer that.
-- A non-VM approach gets the job done without compromising the result.
+- The normal sandbox clearly has everything needed and using the VM would add no value, such as a simple file read, local text search, small source edit, or project-local test that already runs normally.
+- A normal user-level package install outside the VM is likely to work cleanly with `uv`, `cargo binstall`, `cargo install`, `npm`, `npx`, or a project-local package manager.
+- The task must verify behavior in the exact normal sandbox environment rather than a disposable Alpine guest.
 
-The VM is for privilege, not convenience.
+Avoid the VM for changes that must affect the host environment outside the mounted workspace or exchange directory, because the guest is reset on every invocation.
 
 ## Running it
 
@@ -35,6 +52,8 @@ The examples below write that path as `<skill-dir>/agent-microvm` — substitute
   ```sh
   <skill-dir>/agent-microvm bash -c 'sudo apk add nmap && nmap -sn 127.0.0.1'
   ```
+
+  For one-shot tasks, put any needed package installation at the front of the VM command.
 
 - Open an interactive shell (no arguments):
 
@@ -54,67 +73,24 @@ The examples below write that path as `<skill-dir>/agent-microvm` — substitute
 - Login user `user` (uid 1000), passwordless `sudo` to root.
 - Network access is available (DHCP, outbound to the internet).
 
-## Installing packages
+## Installing OS packages in the VM
 
 Packages come from Alpine's `main` and `community` repositories:
 
 ```sh
-apk search -q <term>      # find a package
-sudo apk add <pkg> ...    # install (the package index is already populated)
+sudo apk add <pkg> ...
 ```
 
-Install whatever you need liberally — it disappears with the VM. The package index and pre-installed packages are at most about a week old: the rootfs is rebuilt whenever it is older than 7 days, so `apk` works without a manual `update`.
+Install needed OS packages directly inside the VM. Do not spend time probing whether a tool is already installed; installing an already-present package is fine and cheap.
+
+Use `apk search -q <term>` only when you do not know the Alpine package name. If a reasonable package name is known, try `sudo apk add` first and let `apk` report whether it exists.
+
+Do not work around missing tools with inferior substitutes when installing the correct package would be straightforward. The VM is disposable, package installs vanish on exit, and the package index is already populated.
+
+The rootfs is rebuilt whenever it is older than 7 days, so `apk` works without a manual `update`.
 
 ## Pre-installed packages
 
-The guest already ships these `apk` packages (install more with `sudo apk add`):
+The guest includes a baseline set of common development, networking, build, Python, Node.js, Rust, archive, and diagnostic tools.
 
-- `bind-tools`
-- `build-base`
-- `ca-certificates`
-- `cargo`
-- `coreutils`
-- `curl`
-- `diffutils`
-- `fd`
-- `file`
-- `findutils`
-- `gawk`
-- `gcc`
-- `git`
-- `grep`
-- `gzip`
-- `iproute2`
-- `iputils`
-- `jq`
-- `jujutsu`
-- `libffi-dev`
-- `linux-headers`
-- `netcat-openbsd`
-- `nodejs`
-- `npm`
-- `openssl`
-- `openssl-dev`
-- `pkgconf`
-- `procps-ng`
-- `python3`
-- `python3-dev`
-- `ripgrep`
-- `ruff`
-- `sed`
-- `shellcheck`
-- `sqlite`
-- `sqlite-dev`
-- `strace`
-- `sudo`
-- `tar`
-- `tree`
-- `typescript`
-- `unzip`
-- `uv`
-- `which`
-- `xz`
-- `xz-dev`
-- `zip`
-- `zlib-dev`
-- `zstd`
+Treat the baseline as an optimization, not a contract. If a command relies on a package, include `sudo apk add <pkg>` in the VM command instead of first checking whether it happens to be installed.

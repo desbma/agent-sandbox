@@ -17,7 +17,6 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "agent-microvm"
 SKILL_PATH = SCRIPT_PATH.parent / "SKILL.md"
-SKILL_PACKAGES_HEADING = "## Pre-installed packages"
 SCRIPT_LOADER = importlib.machinery.SourceFileLoader("agent_microvm", str(SCRIPT_PATH))
 SPEC = importlib.util.spec_from_loader("agent_microvm", SCRIPT_LOADER)
 assert SPEC is not None
@@ -77,17 +76,6 @@ def read_newc(blob: bytes) -> list[tuple[str, int, int, int, bytes]]:
         if name == CPIO_TRAILER_NAME:
             return entries
         entries.append((name, fields[1], fields[2], fields[5], data))
-
-
-def skill_packages() -> set[str]:
-    """Return the package names listed in the SKILL.md pre-installed packages section."""
-    text = SKILL_PATH.read_text(encoding="utf-8")
-    section = text.split(SKILL_PACKAGES_HEADING, 1)[1].split("\n## ", 1)[0]
-    return {
-        line.removeprefix("- ").strip("`")
-        for line in section.splitlines()
-        if line.startswith("- ")
-    }
 
 
 def workspace_share(*, readonly: bool = False) -> agent_microvm.VirtiofsShare:
@@ -986,10 +974,6 @@ class MicrovmCommandTests(unittest.TestCase):
 
             run_microvm.assert_not_called()
             printer.assert_called_once_with(agent_microvm.usage(), end="")
-
-    def test_skill_doc_lists_current_agent_packages(self) -> None:
-        """Keep the SKILL.md package list in sync with the installed agent packages."""
-        self.assertEqual(skill_packages(), set(agent_microvm.AGENT_PACKAGES))
 
     def test_skill_doc_states_current_alpine_version_and_arch(self) -> None:
         """Keep the SKILL.md Alpine version and arch in sync with the script constants."""

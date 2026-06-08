@@ -1,6 +1,6 @@
 [tool.ruff]
 target-version = "py313"
-extend-include = ["sandbox-coding-agent", "agent-microvm/agent-microvm"]
+extend-include = ["agent-microvm/agent-microvm", "agent-proxy/agent-proxy", "sandbox-coding-agent"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -19,4 +19,4 @@ ignore = [
 ]
 
 [tool.ty.src]
-include = ["sandbox-coding-agent", "agent-microvm", "agent-microvm/agent-microvm"]
+include = ["agent-microvm", "agent-microvm/agent-microvm", "agent-proxy/agent-proxy", "sandbox-coding-agent"]

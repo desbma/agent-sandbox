@@ -35,6 +35,7 @@ These scripts were preceded by experiments with different container ([Firejail](
 - Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
 - Provides an exchange directory for sharing files that don't belong in the repository
 - Exposes `/dev/kvm`, so the agent can run nested VMs: this is what lets `agent-microvm` work from inside the sandbox
+- Optionally routes `gh` through a host-side [auth proxy](#authenticated-proxy-optional), so the GitHub API works inside the sandbox without ever exposing the token to the agent
 
 **Network isolation is out of scope: the agent has access to the same network as the host.**
 
@@ -60,6 +61,27 @@ exec sandbox-coding-agent /usr/bin/claude --dangerously-skip-permissions "$@"
 Replace `/usr/bin/claude` by the location of the main Claude Code binary. Use `~/.local/libexec/claude` if you have manually downloaded the `claude` binary, to avoid running it outside of the sandbox by accident.
 
 3. Just run `claude` as usual, it will go through the sandbox
+
+### Authenticated proxy (optional)
+
+An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets `gh` reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher injects the env vars that point `gh` at it.
+
+Setup, on the host:
+
+```sh
+install -Dm755 agent-proxy/agent-proxy ~/.local/bin/agent-proxy
+install -Dm644 agent-proxy/agent-proxy.service ~/.config/systemd/user/agent-proxy.service
+
+# Encrypt a GitHub token into the user credstore
+install -d -m700 ~/.config/credstore.encrypted
+printf 'GitHub token: '; stty -echo; read -r token; stty echo; echo
+printf '%s' "$token" |
+  systemd-creds --user encrypt --name=github_token - ~/.config/credstore.encrypted/github_token
+unset token
+
+systemctl --user daemon-reload
+systemctl --user enable --now agent-proxy.service
+```
 
 ## `agent-microvm`
 

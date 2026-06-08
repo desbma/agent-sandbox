@@ -139,6 +139,11 @@ XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
 XDG_RUNTIME_DIR = Path(os.environ["XDG_RUNTIME_DIR"])
 XDG_STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
 
+# auth-injecting proxy
+PROXY_CA_BUNDLE = XDG_RUNTIME_DIR / "agent-proxy/ca-bundle.crt"
+PROXY_ADDRESS = "127.0.0.1:8085"
+GH_PLACEHOLDER_TOKEN = "agent-proxy-placeholder"
+
 # static mounts in sandbox
 MOUNTS: list[Mount] = [
     # tmpfs
@@ -399,6 +404,19 @@ def gen_global_agents_md(
     return f"{base_global_agents_md}\n\n{global_agents_md_addition}\n".encode()
 
 
+def proxy_setup() -> tuple[Mount, dict[str, str]] | None:
+    """Return the CA bundle mount and env routing gh through the auth proxy, if it is running."""
+    if not PROXY_CA_BUNDLE.is_file():
+        return None
+    env = {
+        "GH_TOKEN": GH_PLACEHOLDER_TOKEN,
+        "HTTPS_PROXY": f"http://{PROXY_ADDRESS}",
+        "NO_PROXY": "127.0.0.1,localhost",
+        "SSL_CERT_FILE": str(PROXY_CA_BUNDLE),
+    }
+    return Mount(PROXY_CA_BUNDLE, None, MountKind.BIND_RO), env
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     bwrap_args = [
@@ -467,6 +485,14 @@ if __name__ == "__main__":
             Mount(Path(unjail), SANDBOX_BIN_DIR / "unjail", MountKind.BIND_RO),
             Mount(XDG_RUNTIME_DIR / "unjaild/xdg-open", None, MountKind.BIND_RO),
         ]
+
+    # auth-injecting proxy
+    proxy = proxy_setup()
+    if proxy is None:
+        proxy_env: dict[str, str] = {}
+    else:
+        proxy_mount, proxy_env = proxy
+        mounts.append(proxy_mount)
 
     # build mount arguments, shortest target path first to avoid shadowing
     mounts.sort(key=lambda m: (len(m.target.parts), m.target.parts))
@@ -559,7 +585,7 @@ if __name__ == "__main__":
 
     # env
     bwrap_args.append("--clearenv")
-    for env_k, env_v in ENV_SET.items():
+    for env_k, env_v in (ENV_SET | proxy_env).items():
         bwrap_args += ["--setenv", env_k, env_v]
     for env_k in ENV_FORWARD + [
         k for k in os.environ if k.startswith(f"{AGENT.upper()}_")

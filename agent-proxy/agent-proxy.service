@@ -1,0 +1,10 @@
+[Unit]
+Description=Auth-injecting proxy for the coding-agent sandbox
+
+[Service]
+ExecStart=%h/.local/bin/%N
+LoadCredentialEncrypted=github_token
+RuntimeDirectory=%N
+
+[Install]
+WantedBy=default.target

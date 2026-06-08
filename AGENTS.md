@@ -7,6 +7,8 @@ Tooling to run coding agents (Claude Code, Codex, Amp, pi) inside tight, disposa
 
 The two compose: an agent normally lives in the bwrap sandbox and reaches for the microVM only when it needs privileges the sandbox withholds. Because the microVM runs inside the bwrap sandbox, everything stays doubly contained and is discarded on exit.
 
+Alongside these, **`agent-proxy/`** is an optional host-side [mitmproxy](https://mitmproxy.org/) user service: it injects a real GitHub token into `gh`'s requests to `api.github.com` so the agent can use the GitHub API without the sandbox ever holding the token. When the service is running, `sandbox-coding-agent` routes `gh` through it; README covers setup.
+
 ## Code Style
 
 These conventions apply repository-wide, to test code as much as to main code.

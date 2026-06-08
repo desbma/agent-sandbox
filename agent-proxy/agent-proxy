@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+
+"""Auth-injecting proxy backend for the coding-agent sandbox."""
+
+from __future__ import annotations
+
+import functools
+import os
+import re
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mitmproxy import http  # ty: ignore[unresolved-import]
+
+GITHUB_API_HOST = "api.github.com"
+ALLOW_HOSTS = rf"^{re.escape(GITHUB_API_HOST)}:443$"
+LISTEN_HOST = "127.0.0.1"
+LISTEN_PORT = "8085"
+SYSTEM_CA_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
+DATA_DIR = (
+    Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "agent-proxy"
+)
+CA_CERT = DATA_DIR / "mitmproxy-ca-cert.pem"
+
+
+@functools.cache
+def github_token() -> str:
+    """Read the GitHub token from the systemd credential directory."""
+    return (
+        (Path(os.environ["CREDENTIALS_DIRECTORY"]) / "github_token").read_text().strip()
+    )
+
+
+def running() -> None:
+    """Publish the combined CA bundle once mitmproxy's CA exists (mitmproxy hook)."""
+    bundle = Path(os.environ["RUNTIME_DIRECTORY"]) / "ca-bundle.crt"
+    bundle.write_bytes(SYSTEM_CA_BUNDLE.read_bytes() + b"\n" + CA_CERT.read_bytes())
+
+
+def request(flow: http.HTTPFlow) -> None:
+    """Inject the token on requests whose upstream is the GitHub API (mitmproxy hook)."""
+    address = flow.server_conn.address
+    if address is not None and address[0] == GITHUB_API_HOST:
+        flow.request.headers["authorization"] = f"Bearer {github_token()}"
+
+
+def main() -> None:
+    """Replace this process with mitmdump running as the proxy, loading this module."""
+    os.execvp(
+        "mitmdump",
+        [
+            "mitmdump",
+            "-q",
+            "--listen-host",
+            LISTEN_HOST,
+            "--listen-port",
+            LISTEN_PORT,
+            "--set",
+            f"confdir={DATA_DIR}",
+            "--set",
+            "connection_strategy=lazy",
+            "--allow-hosts",
+            ALLOW_HOSTS,
+            "-s",
+            str(Path(__file__).resolve()),
+        ],
+    )
+
+
+if __name__ == "__main__":
+    main()

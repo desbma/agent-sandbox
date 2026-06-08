@@ -4,7 +4,7 @@ This is my opinionated solution for the coding agent sandboxing problem.
 
 ## Rationale & philosophy
 
-The core principle of coding agents involves allowing a stochastic model to run random commands on your system. This is not a security _bug_, this is RCE _by design_.
+The core principle of coding agents involves allowing a stochastic model to run random commands on your system. That premise is RCE _by design_.
 
 Built-in solutions in existing agents either involve a simplistic permission system, that everyone bypasses in practice because of approval fatigue, or internal "security theater" sandboxes that the model can bypass on demand.
 
@@ -12,12 +12,13 @@ Instead of adding complexity like some [other](https://github.com/earendil-works
 
 ## Content
 
-This is made from 2 independent parts:
+This is made from 3 parts:
 
 - [`sandbox-coding-agent`](#sandbox-coding-agent): a [Bubblewrap](https://github.com/containers/bubblewrap) based wrapper, that runs coding agents in an isolated environment, sharing some directories only.
+- [`agent-proxy`](#agent-proxy): an optional host-side [mitmproxy](https://mitmproxy.org/) user service that lets [`gh`](https://github.com/cli/cli) reach the GitHub API from inside the sandbox without exposing the token to the agent.
 - [`agent-microvm`](#agent-microvm): a [skill](https://agentskills.io/) the agent can use to spawn a throwaway microVM and run privileged commands in it, completely isolated from the host.
 
-These scripts were preceded by experiments with different container ([Firejail](https://github.com/netblue30/firejail), [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)) and VMM ([CrosVM](https://github.com/google/crosvm), [cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Firecracker](https://firecracker-microvm.github.io/), [systemd-vmspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-vmspawn.html)) solutions, and were then refined during months of daily use. They are heavily tailored for my workflow, and probably won't work as-is for yours.
+The sandbox and microVM scripts were preceded by experiments with different container ([Firejail](https://github.com/netblue30/firejail), [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)) and VMM ([CrosVM](https://github.com/google/crosvm), [cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Firecracker](https://firecracker-microvm.github.io/), [systemd-vmspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-vmspawn.html)) solutions, and were then refined during months of daily use. They are heavily tailored for my workflow, and probably won't work as-is for yours.
 
 ## `sandbox-coding-agent`
 
@@ -35,7 +36,7 @@ These scripts were preceded by experiments with different container ([Firejail](
 - Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
 - Provides an exchange directory for sharing files that don't belong in the repository
 - Exposes `/dev/kvm`, so the agent can run nested VMs: this is what lets `agent-microvm` work from inside the sandbox
-- Optionally routes `gh` through a host-side [auth proxy](#authenticated-proxy-optional), so the GitHub API works inside the sandbox without ever exposing the token to the agent
+- Optionally routes `gh` through [`agent-proxy`](#agent-proxy), so the GitHub API works inside the sandbox without ever exposing the token to the agent
 
 **Network isolation is out of scope: the agent has access to the same network as the host.**
 
@@ -62,7 +63,7 @@ Replace `/usr/bin/claude` by the location of the main Claude Code binary. Use `~
 
 3. Just run `claude` as usual, it will go through the sandbox
 
-### Authenticated proxy (optional)
+## `agent-proxy`
 
 An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets `gh` reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher injects the env vars that point `gh` at it.
 

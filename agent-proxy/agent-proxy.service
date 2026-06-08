@@ -2,6 +2,7 @@
 Description=Auth-injecting proxy for the coding-agent sandbox
 
 [Service]
+Environment=PATH=%h/.local/bin:/usr/bin
 ExecStart=%h/.local/bin/%N
 LoadCredentialEncrypted=github_token
 RuntimeDirectory=%N

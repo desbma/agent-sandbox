@@ -207,19 +207,19 @@ MOUNTS: list[Mount] = [
 ]
 
 # global dynamically generated AGENTS.md
-GLOBAL_AGENTS_MD_ADDITION = """## Sandbox environment
+GLOBAL_AGENTS_MD_INTRO = """## Sandbox environment
 
 You are running in a `bwrap` based sandbox.
 
 - Do not attempt to directly run commands that require privileges (`sudo`, `su`, etc.), they would fail. If you need to do so, use the `agent-microvm` skill.
-- You have unrestricted network access.
-- You have a different view of the filesystem than the user. Some notable mount points in your environment are:
-  - tmpfs filesystems (paths under these can not be accessed outside of the sandbox by the user, unless under a deeper mount point; they may also be cleared if the agent is restarted): TMPFS_LIST
-  - overlayfs filesystems (your sandbox inherits their content on startup, but changes are not reflected outside of the sandbox): OVERLAYFS_LIST
-  - read-only bind mounts: BIND_RO_LIST
-  - normal bind mounts (allowing writes, reflected outside of the sandbox): BIND_RW_LIST
-- If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `EXCHANGE_DIR` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.
-- `xdg-open` is available to open files or URLs for the user."""
+- You have unrestricted network access."""
+# filesystem-bullet sublist entries, keyed by mount kind, in display order
+MOUNT_KIND_DESCRIPTIONS = {
+    MountKind.TMPFS: "tmpfs filesystems (paths under these can not be accessed outside of the sandbox by the user, unless under a deeper mount point; they may also be cleared if the agent is restarted)",
+    MountKind.OVERLAYFS: "overlayfs filesystems (your sandbox inherits their content on startup, but changes are not reflected outside of the sandbox)",
+    MountKind.BIND_RO: "read-only bind mounts",
+    MountKind.BIND_RW: "normal bind mounts (allowing writes, reflected outside of the sandbox)",
+}
 GLOBAL_AGENTS_MD = {
     "amp": HOME / ".config/amp/AGENTS.md",
     "claude": HOME / ".claude/CLAUDE.md",
@@ -368,40 +368,38 @@ def gen_global_agents_md(
     exchange_dir: Path | None,
     *,
     has_unjaild: bool,
+    has_proxy: bool,
     dir_mounts: dict[MountKind, list[Path]],
-) -> bytes | None:
-    """Generate content for global AGENTS.md."""
+) -> bytes:
+    """Generate the global AGENTS.md: the user's base file plus the sandbox section."""
+    filesystem_note = [
+        "You have a different view of the filesystem than the user. Some notable mount points in your environment are:",
+    ]
+    for kind, description in MOUNT_KIND_DESCRIPTIONS.items():
+        if kind_mounts := dir_mounts.get(kind):
+            joined = ", ".join(f"`{kind_mount}`" for kind_mount in kind_mounts)
+            filesystem_note.append(f"  - {description}: {joined}")
+
+    bullets = ["\n".join(filesystem_note)]
+    if exchange_dir is not None:
+        bullets.append(
+            f"""If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `{exchange_dir}` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.""",
+        )
+    if has_unjaild:
+        bullets.append("`xdg-open` is available to open files or URLs for the user.")
+    if has_proxy:
+        bullets.append(
+            "`gh` is available and authenticated; use it to read and search GitHub.",
+        )
+
+    addition = f"{GLOBAL_AGENTS_MD_INTRO}\n" + "\n".join(
+        f"- {bullet}" for bullet in bullets
+    )
     try:
-        with (XDG_CONFIG_HOME / "agents/AGENTS.md").open("rt") as f:
-            base_global_agents_md = f.read().strip()
+        base = (XDG_CONFIG_HOME / "agents/AGENTS.md").read_text().strip()
     except FileNotFoundError:
-        base_global_agents_md = None
-    if exchange_dir is None:
-        global_agents_md_addition = "\n".join(
-            line
-            for line in GLOBAL_AGENTS_MD_ADDITION.splitlines()
-            if "EXCHANGE_DIR" not in line
-        )
-    else:
-        global_agents_md_addition = GLOBAL_AGENTS_MD_ADDITION.replace(
-            "EXCHANGE_DIR",
-            str(exchange_dir),
-        )
-    for kind, kind_mounts in dir_mounts.items():
-        key = f"{kind.name}_LIST"
-        global_agents_md_addition = global_agents_md_addition.replace(
-            key,
-            ", ".join(f"`{kind_mount!s}`" for kind_mount in kind_mounts),
-        )
-    if not has_unjaild:
-        global_agents_md_addition = "\n".join(
-            line
-            for line in global_agents_md_addition.splitlines()
-            if "xdg-open" not in line
-        )
-    if base_global_agents_md is None:
-        return global_agents_md_addition.encode()
-    return f"{base_global_agents_md}\n\n{global_agents_md_addition}\n".encode()
+        return f"{addition}\n".encode()
+    return f"{base}\n\n{addition}\n".encode()
 
 
 def proxy_setup() -> tuple[Mount, dict[str, str]] | None:
@@ -545,16 +543,15 @@ if __name__ == "__main__":
     except KeyError:
         pass
     else:
-        global_agents_md_content = gen_global_agents_md(
-            exchange_dir,
-            has_unjaild=(unjail_xdg is not None) and (unjail is not None),
-            dir_mounts=dir_mounts,
+        files[global_agents_md_path] = (
+            gen_global_agents_md(
+                exchange_dir,
+                has_unjaild=(unjail_xdg is not None) and (unjail is not None),
+                has_proxy=proxy is not None,
+                dir_mounts=dir_mounts,
+            ),
+            "400",
         )
-        if global_agents_md_content is not None:
-            files[global_agents_md_path] = (
-                global_agents_md_content,
-                "400",
-            )
     if AGENT == "codex":
         # avoid "do you trust this directory?" prompt
         with (XDG_CONFIG_HOME / "codex/config.toml").open("rt") as f:

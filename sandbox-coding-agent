@@ -249,8 +249,9 @@ MOUNTS: list[Mount] = [
     Mount(Path("/tmp"), None, MountKind.TMPFS),
     Mount(Path("/usr/local"), None, MountKind.TMPFS),
     # read-only binds
-    Mount(Path("/usr"), None, MountKind.BIND_RO),
     Mount(Path("/opt/intel"), None, MountKind.BIND_RO),
+    Mount(Path("/usr"), None, MountKind.BIND_RO),
+    Mount(Path("/var/lib/ghc"), None, MountKind.BIND_RO),
     # system config
     Mount(Path("/etc/alternatives"), None, MountKind.BIND_RO),
     Mount(Path("/etc/ca-certificates"), None, MountKind.BIND_RO),

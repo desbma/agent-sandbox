@@ -325,7 +325,18 @@ GLOBAL_AGENTS_MD = {
 }
 
 # tools to expose in sandbox, even if not under /usr
-TOOLS = [os.environ["EDITOR"], "jj", "ruff", "rumdl", "ty", "uv", "uvx"]
+HOME_TOOLS = [
+    os.environ["EDITOR"],
+    "bat",
+    "chezmoi",
+    "fd",
+    "jj",
+    "ruff",
+    "rumdl",
+    "ty",
+    "uv",
+    "uvx",
+]
 
 # per-agent extra mounts
 AGENT_MOUNTS: dict[str, list[Mount]] = {
@@ -457,7 +468,7 @@ if __name__ == "__main__":
         exchange_dir = None
 
     # tools to expose, even if not under /usr
-    for tool_name in TOOLS:
+    for tool_name in HOME_TOOLS:
         tool = Path(tool_name)
         if not tool.is_absolute():
             resolved = shutil.which(tool_name)

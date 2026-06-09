@@ -25,8 +25,10 @@ SCRIPT_LOADER.exec_module(agent_microvm)
 INTEGRATION_ENV_VAR = "AGENT_MICROVM_INTEGRATION"
 INTEGRATION_ENABLED = os.environ.get(INTEGRATION_ENV_VAR) is not None
 SKIP_REASON = f"Set {INTEGRATION_ENV_VAR} to boot a real VM for these tests"
-# Warm-up boot reuses cached artifacts; per-command boots take a few seconds.
-BUILD_TIMEOUT_SECONDS = 90.0
+GITHUB_HOSTED_RUNNER = os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+# The warm-up boot builds all guest artifacts from scratch on a cold cache
+# (downloads, rootfs assembly, squashfs); later per-command boots reuse them.
+BUILD_TIMEOUT_SECONDS = 300.0
 GUEST_RUN_TIMEOUT_SECONDS = 10.0
 PEER_WAIT_TIMEOUT_SECONDS = 30.0
 PEER_WAIT_INTERVAL_SECONDS = 0.2
@@ -99,6 +101,9 @@ class MicrovmIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "0")
 
+    @unittest.skipIf(
+        GITHUB_HOSTED_RUNNER, "GitHub-hosted runners drop inbound ICMP echo replies"
+    )
     def test_unprivileged_user_can_ping(self) -> None:
         """Ping a public address as the unprivileged user without a raw socket."""
         result = run_guest(("ping", "-c1", "-W3", PING_TARGET))

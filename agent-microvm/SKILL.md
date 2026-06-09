@@ -69,7 +69,7 @@ The examples below write that path as `<skill-dir>/agent-microvm` — substitute
 
 ## Guest facts
 
-- Alpine Linux 3.23, `x86_64`.
+- Alpine Linux 3.24, `x86_64`.
 - Login user `user` (uid 1000), passwordless `sudo` to root.
 - Network access is available (DHCP, outbound to the internet).
 

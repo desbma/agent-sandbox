@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 
 SCRIPT_NAME = Path(__file__).resolve().name
 LOGGER = logging.getLogger(SCRIPT_NAME)
-ALPINE_BRANCH = "v3.23"
-ALPINE_VERSION = "3.23.4"
+ALPINE_BRANCH = "v3.24"
+ALPINE_VERSION = "3.24.0"
 ALPINE_ARCH = "x86_64"
 ALPINE_CDN = "https://dl-cdn.alpinelinux.org/alpine"
 ALPINE_REPOSITORIES = ("main", "community")

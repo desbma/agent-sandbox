@@ -1,6 +1,7 @@
 """Test QEMU microvm prototype command and initramfs construction."""
 
 import base64
+import fcntl
 import importlib.machinery
 import importlib.util
 import logging
@@ -767,6 +768,125 @@ class MicrovmCommandTests(unittest.TestCase):
             artifacts = self.current_artifacts(Path(temporary_directory))
 
             self.assertTrue(agent_microvm.artifacts_are_current(artifacts))
+
+    def test_prune_removes_stale_version_directories(self) -> None:
+        """Delete cached artifact directories of other Alpine versions."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_root = Path(temporary_directory)
+            current_dir = cache_root / "alpine-v3.99"
+            current_dir.mkdir()
+            artifacts = self.current_artifacts(current_dir)
+            stale_dir = cache_root / "alpine-v3.98"
+            stale_dir.mkdir()
+            (stale_dir / "usr.squashfs").write_bytes(b"")
+            unrelated_dir = cache_root / "other"
+            unrelated_dir.mkdir()
+
+            agent_microvm.prune_stale_artifacts(artifacts)
+
+            self.assertFalse(stale_dir.exists())
+            self.assertTrue(current_dir.exists())
+            self.assertTrue(unrelated_dir.exists())
+
+    def test_prune_keeps_directory_with_held_build_lock(self) -> None:
+        """Keep a stale directory while another process holds its build lock."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_root = Path(temporary_directory)
+            current_dir = cache_root / "alpine-v3.99"
+            current_dir.mkdir()
+            artifacts = self.current_artifacts(current_dir)
+            stale_dir = cache_root / "alpine-v3.98"
+            stale_dir.mkdir()
+            stale_artifacts = agent_microvm.GuestArtifacts(
+                kernel_path=stale_dir / "vmlinuz-virt",
+                initramfs_path=stale_dir / "rootfs.cpio",
+                usr_squashfs_path=stale_dir / "usr.squashfs",
+            )
+
+            with stale_artifacts.lock_path.open("w") as holder:
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                agent_microvm.prune_stale_artifacts(artifacts)
+                self.assertTrue(stale_dir.exists())
+
+            agent_microvm.prune_stale_artifacts(artifacts)
+            self.assertFalse(stale_dir.exists())
+
+    def test_prune_keeps_directory_with_live_session(self) -> None:
+        """Keep a stale directory while a session holds its shared session lock."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_root = Path(temporary_directory)
+            current_dir = cache_root / "alpine-v3.99"
+            current_dir.mkdir()
+            artifacts = self.current_artifacts(current_dir)
+            stale_dir = cache_root / "alpine-v3.98"
+            stale_dir.mkdir()
+            stale_artifacts = agent_microvm.GuestArtifacts(
+                kernel_path=stale_dir / "vmlinuz-virt",
+                initramfs_path=stale_dir / "rootfs.cpio",
+                usr_squashfs_path=stale_dir / "usr.squashfs",
+            )
+
+            with agent_microvm.artifact_session_lock(stale_artifacts):
+                agent_microvm.prune_stale_artifacts(artifacts)
+                self.assertTrue(stale_dir.exists())
+
+            agent_microvm.prune_stale_artifacts(artifacts)
+            self.assertFalse(stale_dir.exists())
+
+    def test_session_lock_is_shared(self) -> None:
+        """Admit concurrent sessions on the session lock but block exclusive takers."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            artifacts = self.current_artifacts(Path(temporary_directory))
+
+            with agent_microvm.artifact_session_lock(artifacts):
+                with artifacts.session_lock_path.open("w") as probe:
+                    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                with (
+                    artifacts.session_lock_path.open("w") as probe,
+                    self.assertRaises(BlockingIOError),
+                ):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_run_microvm_prunes_and_holds_session_lock(self) -> None:
+        """Prune stale versions and hold the session lock across the VM run."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_root = Path(temporary_directory)
+            current_dir = cache_root / "alpine-v3.99"
+            current_dir.mkdir()
+            artifacts = self.current_artifacts(current_dir)
+            stale_dir = cache_root / "alpine-v3.98"
+            stale_dir.mkdir()
+
+            def probe_session_lock(**_kwargs: object) -> int:
+                """Assert the session lock is held while the VM runs."""
+                with (
+                    artifacts.session_lock_path.open("w") as probe,
+                    self.assertRaises(BlockingIOError),
+                ):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return 0
+
+            with (
+                unittest.mock.patch.object(
+                    agent_microvm, "default_artifacts", return_value=artifacts
+                ),
+                unittest.mock.patch.object(
+                    agent_microvm,
+                    "generate_ssh_keypair",
+                    return_value=(SSH_PRIVATE_KEY_PATH, PUBLIC_KEY),
+                ),
+                unittest.mock.patch.object(
+                    agent_microvm,
+                    "resolve_executable",
+                    side_effect=(Path("/usr/bin/passt"), Path("/usr/bin/virtiofsd")),
+                ),
+                unittest.mock.patch.object(
+                    agent_microvm, "run_processes", side_effect=probe_session_lock
+                ),
+            ):
+                self.assertEqual(agent_microvm.run_microvm(()), 0)
+
+            self.assertFalse(stale_dir.exists())
 
     def test_guest_init_mounts_workspace_best_effort(self) -> None:
         """Generate guest init that mounts the workspace best-effort and powers off."""

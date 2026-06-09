@@ -143,6 +143,8 @@ VIRTIOFSD_SOCKET_TIMEOUT_SECONDS = 3.0
 GUEST_READY_TIMEOUT_SECONDS = 30.0
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
+PREPARE_LOCK_FILENAME = "prepare.lock"
+SESSION_LOCK_FILENAME = "session.lock"
 PREPARE_RECIPE_VERSION = 6
 ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 BOOT_TRACE_ENV_VAR = "BOOT_TRACE_SANDBOX_AGENT"
@@ -203,7 +205,12 @@ class GuestArtifacts:
     @property
     def lock_path(self) -> Path:
         """Return the lock path serializing artifact preparation across processes."""
-        return self.kernel_path.parent / "prepare.lock"
+        return self.kernel_path.parent / PREPARE_LOCK_FILENAME
+
+    @property
+    def session_lock_path(self) -> Path:
+        """Return the lock path sessions hold shared while these artifacts are in use."""
+        return self.kernel_path.parent / SESSION_LOCK_FILENAME
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -616,6 +623,34 @@ def artifact_build_lock(artifacts: GuestArtifacts) -> Iterator[None]:
         yield
 
 
+@contextlib.contextmanager
+def artifact_session_lock(artifacts: GuestArtifacts) -> Iterator[None]:
+    """Hold a shared lock marking the artifact set as used by a live session."""
+    with artifacts.session_lock_path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        yield
+
+
+def prune_stale_artifacts(artifacts: GuestArtifacts) -> None:
+    """Delete cached artifact directories left behind by previous Alpine pins."""
+    current_dir = artifacts.kernel_path.parent
+    for entry in current_dir.parent.glob("alpine-*"):
+        if entry == current_dir or not entry.is_dir():
+            continue
+        with contextlib.ExitStack() as lock_handles:
+            try:
+                # A held build lock means a launcher pinning this version is
+                # preparing it; a held session lock means one is about to boot.
+                for filename in (PREPARE_LOCK_FILENAME, SESSION_LOCK_FILENAME):
+                    handle = lock_handles.enter_context((entry / filename).open("w"))
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                LOGGER.info("Keeping in-use stale artifacts at %s", entry)
+                continue
+            LOGGER.info("Pruning stale artifacts at %s", entry)
+            shutil.rmtree(entry)
+
+
 def prepare_guest(artifacts: GuestArtifacts) -> None:
     """Download Alpine artifacts, build the boot initramfs and the /usr squashfs."""
     artifact_dir = artifacts.kernel_path.parent
@@ -959,51 +994,55 @@ def run_microvm(command: Sequence[str]) -> int:
     artifacts = default_artifacts()
     workspace_path = Path.cwd().resolve()
     ensure_artifacts(artifacts)
-    runtime_paths = create_runtime_paths()
-    try:
-        passt_path = resolve_executable("passt")
-        ssh_host_port = find_free_tcp_port()
-        private_key_path, public_key = generate_ssh_keypair(runtime_paths.runtime_path)
-        microvm_config = build_run_microvm_config(
-            artifacts,
-            workspace_path,
-            runtime_paths,
-            passt_path,
-            public_key,
-            ssh_host_port,
-        )
-        qemu_command = build_qemu_command(microvm_config)
-        virtiofsd_path = resolve_executable("virtiofsd")
-        virtiofsd_commands = tuple(
-            build_virtiofsd_command(
-                virtiofsd_path=virtiofsd_path,
-                share=share,
-                host_uid=os.getuid(),
-                host_gid=os.getgid(),
+    with artifact_session_lock(artifacts):
+        prune_stale_artifacts(artifacts)
+        runtime_paths = create_runtime_paths()
+        try:
+            passt_path = resolve_executable("passt")
+            ssh_host_port = find_free_tcp_port()
+            private_key_path, public_key = generate_ssh_keypair(
+                runtime_paths.runtime_path
             )
-            for share in microvm_config.shares
-        )
-        ssh_command = build_ssh_command(
-            SshSession(
-                private_key_path=private_key_path,
-                host_port=ssh_host_port,
-                command=tuple(command),
-                allocate_pty=sys.stdin.isatty(),
-                environment=forwarded_environment(),
+            microvm_config = build_run_microvm_config(
+                artifacts,
+                workspace_path,
+                runtime_paths,
+                passt_path,
+                public_key,
+                ssh_host_port,
             )
-        )
-        LOGGER.info("Booting VM")
-        if debug_enabled():
-            print_commands((*virtiofsd_commands, qemu_command, ssh_command))
-        return run_processes(
-            virtiofsd_commands=virtiofsd_commands,
-            qemu_command=qemu_command,
-            ssh_command=ssh_command,
-            config=microvm_config,
-            trace=BootTrace(),
-        )
-    finally:
-        shutil.rmtree(runtime_paths.runtime_path)
+            qemu_command = build_qemu_command(microvm_config)
+            virtiofsd_path = resolve_executable("virtiofsd")
+            virtiofsd_commands = tuple(
+                build_virtiofsd_command(
+                    virtiofsd_path=virtiofsd_path,
+                    share=share,
+                    host_uid=os.getuid(),
+                    host_gid=os.getgid(),
+                )
+                for share in microvm_config.shares
+            )
+            ssh_command = build_ssh_command(
+                SshSession(
+                    private_key_path=private_key_path,
+                    host_port=ssh_host_port,
+                    command=tuple(command),
+                    allocate_pty=sys.stdin.isatty(),
+                    environment=forwarded_environment(),
+                )
+            )
+            LOGGER.info("Booting VM")
+            if debug_enabled():
+                print_commands((*virtiofsd_commands, qemu_command, ssh_command))
+            return run_processes(
+                virtiofsd_commands=virtiofsd_commands,
+                qemu_command=qemu_command,
+                ssh_command=ssh_command,
+                config=microvm_config,
+                trace=BootTrace(),
+            )
+        finally:
+            shutil.rmtree(runtime_paths.runtime_path)
 
 
 def artifacts_are_current(artifacts: GuestArtifacts) -> bool:

@@ -49,10 +49,6 @@ class Mount:
         return self.dst or self.src
 
 
-AGENT = Path(sys.argv[1]).name
-DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
-
-
 def get_repo_root() -> Path | None:
     """Get root of the jj or git repo containing the cwd, first match wins."""
     for cmd in [["jj", "root"], ["git", "rev-parse", "--show-toplevel"]]:
@@ -129,6 +125,106 @@ def confirm_cwd() -> Path:
         fatal_error(f"Refusing to start in {str(HOME)!r}")
     return cwd
 
+
+def memfd_data(data: bytes) -> int:
+    """Generate a memfd with data written in it."""
+    fd = os.memfd_create("", 0)
+    os.write(fd, data)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return fd
+
+
+def gen_passwd() -> bytes:
+    """Generate stripped down /etc/passwd file content."""
+    b = bytearray()
+    uid = os.getuid()
+    bash = "/usr/bin/bash"
+    entries = [pwd.getpwuid(uid)]
+    for group in GROUPS:
+        with contextlib.suppress(KeyError):
+            entries.append(pwd.getpwnam(group))
+    for entry in entries:
+        entry_vals = list(entry)
+        if (entry.pw_uid == uid) and (entry.pw_shell != bash):
+            entry_vals[6] = bash
+        b.extend(":".join(map(str, entry_vals)).encode())
+        b.extend(b"\n")
+    return bytes(b)
+
+
+def gen_group() -> bytes:
+    """Generate stripped down /etc/group file content."""
+    b = bytearray()
+    gid = os.getgid()
+    entries = [grp.getgrgid(gid)]
+    for group_name in GROUPS:
+        with contextlib.suppress(KeyError):
+            entries.append(grp.getgrnam(group_name))
+    for grp_entry in entries:
+        fields: list[str] = [
+            grp_entry.gr_name,
+            grp_entry.gr_passwd or "",
+            str(grp_entry.gr_gid),
+            ",".join(grp_entry.gr_mem),
+        ]
+        b.extend(":".join(fields).encode())
+        b.extend(b"\n")
+    return bytes(b)
+
+
+def gen_global_agents_md(
+    exchange_dir: Path | None,
+    *,
+    has_unjaild: bool,
+    has_proxy: bool,
+    dir_mounts: dict[MountKind, list[Path]],
+) -> bytes:
+    """Generate the global AGENTS.md: the user's base file plus the sandbox section."""
+    filesystem_note = [
+        "You have a different view of the filesystem than the user. Some notable mount points in your environment are:",
+    ]
+    for kind, description in MOUNT_KIND_DESCRIPTIONS.items():
+        if kind_mounts := dir_mounts.get(kind):
+            joined = ", ".join(f"`{kind_mount}`" for kind_mount in kind_mounts)
+            filesystem_note.append(f"  - {description}: {joined}")
+
+    bullets = ["\n".join(filesystem_note)]
+    if exchange_dir is not None:
+        bullets.append(
+            f"""If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `{exchange_dir}` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.""",
+        )
+    if has_unjaild:
+        bullets.append("`xdg-open` is available to open files or URLs for the user.")
+    if has_proxy:
+        bullets.append(
+            "`gh` is available and authenticated; use it to read and search GitHub.",
+        )
+
+    addition = f"{GLOBAL_AGENTS_MD_INTRO}\n" + "\n".join(
+        f"- {bullet}" for bullet in bullets
+    )
+    try:
+        base = (XDG_CONFIG_HOME / "agents/AGENTS.md").read_text().strip()
+    except FileNotFoundError:
+        return f"{addition}\n".encode()
+    return f"{base}\n\n{addition}\n".encode()
+
+
+def proxy_setup() -> tuple[Mount, dict[str, str]] | None:
+    """Return the CA bundle mount and env routing gh through the auth proxy, if it is running."""
+    if not PROXY_CA_BUNDLE.is_file():
+        return None
+    env = {
+        "GH_TOKEN": GH_PLACEHOLDER_TOKEN,
+        "HTTPS_PROXY": f"http://{PROXY_ADDRESS}",
+        "NO_PROXY": "127.0.0.1,localhost",
+        "SSL_CERT_FILE": str(PROXY_CA_BUNDLE),
+    }
+    return Mount(PROXY_CA_BUNDLE, None, MountKind.BIND_RO), env
+
+
+AGENT = Path(sys.argv[1]).name
+DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
 
 # host dirs
 HOME = Path.home()
@@ -316,103 +412,6 @@ ENV_FORWARD = [
 
 # groups to copy from host in sandbox
 GROUPS = ["kvm", "nobody", "nogroup"]
-
-
-def memfd_data(data: bytes) -> int:
-    """Generate a memfd with data written in it."""
-    fd = os.memfd_create("", 0)
-    os.write(fd, data)
-    os.lseek(fd, 0, os.SEEK_SET)
-    return fd
-
-
-def gen_passwd() -> bytes:
-    """Generate stripped down /etc/passwd file content."""
-    b = bytearray()
-    uid = os.getuid()
-    bash = "/usr/bin/bash"
-    entries = [pwd.getpwuid(uid)]
-    for group in GROUPS:
-        with contextlib.suppress(KeyError):
-            entries.append(pwd.getpwnam(group))
-    for entry in entries:
-        entry_vals = list(entry)
-        if (entry.pw_uid == uid) and (entry.pw_shell != bash):
-            entry_vals[6] = bash
-        b.extend(":".join(map(str, entry_vals)).encode())
-        b.extend(b"\n")
-    return bytes(b)
-
-
-def gen_group() -> bytes:
-    """Generate stripped down /etc/group file content."""
-    b = bytearray()
-    gid = os.getgid()
-    entries = [grp.getgrgid(gid)]
-    for group_name in GROUPS:
-        with contextlib.suppress(KeyError):
-            entries.append(grp.getgrnam(group_name))
-    for grp_entry in entries:
-        fields: list[str] = [
-            grp_entry.gr_name,
-            grp_entry.gr_passwd or "",
-            str(grp_entry.gr_gid),
-            ",".join(grp_entry.gr_mem),
-        ]
-        b.extend(":".join(fields).encode())
-        b.extend(b"\n")
-    return bytes(b)
-
-
-def gen_global_agents_md(
-    exchange_dir: Path | None,
-    *,
-    has_unjaild: bool,
-    has_proxy: bool,
-    dir_mounts: dict[MountKind, list[Path]],
-) -> bytes:
-    """Generate the global AGENTS.md: the user's base file plus the sandbox section."""
-    filesystem_note = [
-        "You have a different view of the filesystem than the user. Some notable mount points in your environment are:",
-    ]
-    for kind, description in MOUNT_KIND_DESCRIPTIONS.items():
-        if kind_mounts := dir_mounts.get(kind):
-            joined = ", ".join(f"`{kind_mount}`" for kind_mount in kind_mounts)
-            filesystem_note.append(f"  - {description}: {joined}")
-
-    bullets = ["\n".join(filesystem_note)]
-    if exchange_dir is not None:
-        bullets.append(
-            f"""If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `{exchange_dir}` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.""",
-        )
-    if has_unjaild:
-        bullets.append("`xdg-open` is available to open files or URLs for the user.")
-    if has_proxy:
-        bullets.append(
-            "`gh` is available and authenticated; use it to read and search GitHub.",
-        )
-
-    addition = f"{GLOBAL_AGENTS_MD_INTRO}\n" + "\n".join(
-        f"- {bullet}" for bullet in bullets
-    )
-    try:
-        base = (XDG_CONFIG_HOME / "agents/AGENTS.md").read_text().strip()
-    except FileNotFoundError:
-        return f"{addition}\n".encode()
-    return f"{base}\n\n{addition}\n".encode()
-
-
-def proxy_setup() -> tuple[Mount, dict[str, str]] | None:
-    """Return the CA bundle mount and env routing gh through the auth proxy, if it is running."""
-    if not PROXY_CA_BUNDLE.is_file():
-        return None
-    env = {
-        "GH_TOKEN": GH_PLACEHOLDER_TOKEN,
-        "HTTPS_PROXY": f"http://{PROXY_ADDRESS}",
-        "NO_PROXY": "127.0.0.1,localhost",
-        "SSL_CERT_FILE": str(PROXY_CA_BUNDLE),
-    }
-    return Mount(PROXY_CA_BUNDLE, None, MountKind.BIND_RO), env
 
 
 if __name__ == "__main__":

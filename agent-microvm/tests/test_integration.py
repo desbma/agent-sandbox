@@ -51,10 +51,10 @@ def run_guest(
         [sys.executable, str(SCRIPT_PATH), *command],
         cwd=cwd,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         timeout=timeout,
-        check=False,
     )
 
 

@@ -11,6 +11,7 @@ ignore = [
     "E501",
     "EM",
     "INP001",
+    "PLW1510",
     "PT",
     "S",
     "T201",
@@ -19,4 +20,4 @@ ignore = [
 ]
 
 [tool.ty.src]
-include = ["agent-microvm", "agent-microvm/agent-microvm", "agent-proxy/agent-proxy", "sandbox-coding-agent"]
+include = ["agent-microvm", "agent-microvm/agent-microvm", "agent-proxy/agent-proxy", "sandbox-coding-agent", "tests"]

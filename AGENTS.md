@@ -45,7 +45,14 @@ ruff format --check
 ty check
 ```
 
-The two extensionless launcher scripts (`sandbox-coding-agent` and `agent-microvm/agent-microvm`) are pulled into both tools' file discovery (ruff `extend-include`, ty `src.include`); directory traversal would otherwise skip them. `sandbox-coding-agent` has no unit tests. `agent-microvm` adds a unit suite that must also pass without `sudo`, and an opt-in VM-booting integration suite that needs outbound network. From `agent-microvm/`:
+The two extensionless launcher scripts (`sandbox-coding-agent` and `agent-microvm/agent-microvm`) are pulled into both tools' file discovery (ruff `extend-include`, ty `src.include`); directory traversal would otherwise skip them. `sandbox-coding-agent` is covered by the root `tests/` directory: a unit suite that loads the launcher script as a module, and an opt-in integration suite that starts real bubblewrap sandboxes against synthetic home/XDG trees (needs a working `bwrap` and `/dev/kvm`). From the repository root:
+
+```sh
+python3 -m unittest discover -s tests
+SANDBOX_CODING_AGENT_INTEGRATION=1 python3 -m unittest discover -s tests
+```
+
+`agent-microvm` adds a unit suite that must also pass without `sudo`, and an opt-in VM-booting integration suite that needs outbound network. From `agent-microvm/`:
 
 ```sh
 python3 -m unittest discover -s tests

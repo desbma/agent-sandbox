@@ -359,9 +359,10 @@ def run_quiet(command: Sequence[str]) -> None:
     """Run a command to completion, streaming its output to stderr only under debug."""
     subprocess.run(
         command,
-        check=True,
+        stdin=subprocess.DEVNULL,
         stdout=verbose_subprocess_stdout(),
         stderr=subprocess.STDOUT,
+        check=True,
     )
 
 
@@ -819,6 +820,9 @@ def generate_ssh_keypair(runtime_path: Path) -> tuple[Path, str]:
     private_key_path = runtime_path / "id_ed25519"
     subprocess.run(
         ("ssh-keygen", "-t", SSH_KEY_TYPE, "-N", "", "-f", str(private_key_path), "-q"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         check=True,
     )
     public_key = (

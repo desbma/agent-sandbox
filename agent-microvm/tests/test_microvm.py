@@ -364,6 +364,7 @@ class MicrovmCommandTests(unittest.TestCase):
                     call.kwargs,
                     {
                         "check": True,
+                        "stdin": agent_microvm.subprocess.DEVNULL,
                         "stdout": agent_microvm.subprocess.DEVNULL,
                         "stderr": agent_microvm.subprocess.STDOUT,
                     },

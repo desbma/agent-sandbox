@@ -49,6 +49,14 @@ class Mount:
         return self.dst or self.src
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class File:
+    """Generated file content exposed read-only in the sandbox."""
+
+    data: bytes
+    executable: bool = False
+
+
 def get_repo_root() -> Path | None:
     """Get root of the jj or git repo containing the cwd, first match wins."""
     for cmd in [["jj", "root"], ["git", "rev-parse", "--show-toplevel"]]:
@@ -537,16 +545,15 @@ if __name__ == "__main__":
 
     # generated files
     files = {
-        Path("/etc/group"): (gen_group(), "0400"),
-        Path("/etc/nsswitch.conf"): (
-            b"passwd: files\ngroup: files\nhosts: files dns\n",
-            "0400",
+        Path("/etc/group"): File(gen_group()),
+        Path("/etc/nsswitch.conf"): File(
+            b"passwd: files\ngroup: files\nhosts: files dns\n"
         ),
-        Path("/etc/passwd"): (gen_passwd(), "0400"),
+        Path("/etc/passwd"): File(gen_passwd()),
         # add a small jujutsu wrapper that runs the next resolved jj with --ignore-working-copy (read-only)
-        SANDBOX_BIN_DIR / "jj": (
+        SANDBOX_BIN_DIR / "jj": File(
             b'#!/bin/bash\nexec $(type -aP -- jj | uniq | tail -n +2 | head -n 1) --ignore-working-copy "$@"\n',
-            "0500",
+            executable=True,
         ),
     }
     try:
@@ -554,37 +561,29 @@ if __name__ == "__main__":
     except KeyError:
         pass
     else:
-        files[global_agents_md_path] = (
+        files[global_agents_md_path] = File(
             gen_global_agents_md(
                 exchange_dir,
                 has_unjaild=(unjail_xdg is not None) and (unjail is not None),
                 has_proxy=proxy is not None,
                 dir_mounts=dir_mounts,
-            ),
-            "400",
+            )
         )
     if AGENT == "codex":
         # avoid "do you trust this directory?" prompt
         with (XDG_CONFIG_HOME / "codex/config.toml").open("rt") as f:
-            files[HOME / ".codex/config.toml"] = (
-                f'{f.read()}\n[projects."{CWD!s}"]\ntrust_level = "trusted"\n'.encode(),
-                "0400",
+            files[HOME / ".codex/config.toml"] = File(
+                f'{f.read()}\n[projects."{CWD!s}"]\ntrust_level = "trusted"\n'.encode()
             )
     elif AGENT == "pi":
         # pi needs to have persistent npm modules fo its extensions
-        files[HOME / ".npmrc"] = (
-            f"prefix={HOME / '.pi/agent/npm'!s}\n".encode(),
-            "0400",
-        )
-    for path, (data, perms) in files.items():
-        fd = memfd_data(data)
-        bwrap_args += [
-            "--perms",
-            perms,
-            "--ro-bind-data",
-            str(fd),
-            str(path),
-        ]
+        files[HOME / ".npmrc"] = File(f"prefix={HOME / '.pi/agent/npm'!s}\n".encode())
+    for path, file in files.items():
+        fd = memfd_data(file.data)
+        # bwrap defaults --ro-bind-data to mode 0600, so only override for executables
+        if file.executable:
+            bwrap_args += ["--perms", "0700"]
+        bwrap_args += ["--ro-bind-data", str(fd), str(path)]
 
     # symlinks
     for target, link in (SYMLINKS | AGENT_SYMLINKS.get(AGENT, {})).items():

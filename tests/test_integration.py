@@ -371,7 +371,7 @@ class GeneratedFileTests(SandboxTestCase):
         lines = self.report_str(report, "passwd").splitlines()
         self.assertEqual(lines[0], expected_first)
         self.assertEqual([line.split(":")[0] for line in lines], expected_names)
-        self.assertEqual(report["mode"], "0o400")
+        self.assertEqual(report["mode"], "0o600")
 
     def test_etc_group(self) -> None:
         """Generate a stripped /etc/group led by the current primary group."""
@@ -394,7 +394,7 @@ class GeneratedFileTests(SandboxTestCase):
         )
         lines = self.report_str(report, "group").splitlines()
         self.assertEqual(lines[0], expected_first)
-        self.assertEqual(report["mode"], "0o400")
+        self.assertEqual(report["mode"], "0o600")
 
     def test_etc_nsswitch(self) -> None:
         """Generate an nsswitch.conf resolving users from files and hosts via DNS."""
@@ -417,7 +417,7 @@ class GeneratedFileTests(SandboxTestCase):
         )
 
         self.assertEqual(report["wrapper"], JJ_WRAPPER)
-        self.assertEqual(report["mode"], "0o500")
+        self.assertEqual(report["mode"], "0o700")
 
 
 class EnvironmentTests(SandboxTestCase):
@@ -536,7 +536,7 @@ class InstructionsTests(SandboxTestCase):
         self.assertNotIn("overlayfs filesystems", content)
         self.assertNotIn("xdg-open", content)
         self.assertNotIn("`gh`", content)
-        self.assertEqual(report["mode"], "0o400")
+        self.assertEqual(report["mode"], "0o600")
 
     def test_instructions_without_base_file(self) -> None:
         """Generate only the sandbox section when the user has no base file."""

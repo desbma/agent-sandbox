@@ -40,6 +40,8 @@ jobs:
 
   integration-tests:
     runs-on: ubuntu-latest
+    env:
+      NIXPKGS: "github:NixOS/nixpkgs/nixpkgs-unstable"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -51,12 +53,14 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo ln -sf "$(nix build --no-link --print-out-paths nixpkgs#bubblewrap)/bin/bwrap" /usr/bin/bwrap
-          sudo ln -sf "$(nix build --no-link --print-out-paths nixpkgs#jujutsu)/bin/jj" /usr/bin/jj
+          bwrap=$(nix build --no-link --print-out-paths "$NIXPKGS#bubblewrap")/bin/bwrap
+          jj=$(nix build --no-link --print-out-paths "$NIXPKGS#jujutsu")/bin/jj
+          sudo ln -sf "$bwrap" /usr/bin/bwrap
+          sudo ln -sf "$jj" /usr/bin/jj
       - run: python3 -m unittest discover -s tests -v
         env:
           SANDBOX_CODING_AGENT_INTEGRATION: "1"
-      - run: nix shell nixpkgs#qemu nixpkgs#passt nixpkgs#virtiofsd nixpkgs#cpio nixpkgs#squashfsTools --command python3 -m unittest tests.test_integration -v
+      - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" --command python3 -m unittest tests.test_integration -v
         working-directory: agent-microvm
         env:
           AGENT_MICROVM_INTEGRATION: "1"

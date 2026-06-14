@@ -334,7 +334,7 @@ GLOBAL_AGENTS_MD = {
 
 # tools to expose in sandbox, even if not under /usr
 HOME_TOOLS = [
-    os.environ["EDITOR"],
+    *([editor] if (editor := os.environ.get("EDITOR")) is not None else []),
     "bat",
     "chezmoi",
     "fd",

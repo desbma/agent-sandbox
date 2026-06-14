@@ -25,8 +25,13 @@ FAKE_RUNTIME_DIR = FIXTURE_ROOT / "runtime"
 IMPORT_CWD = FIXTURE_ROOT / "cwd"
 
 
-def load_launcher() -> types.ModuleType:
-    """Load the launcher script as a module under a controlled environment."""
+def load_launcher(
+    env_overrides: dict[str, str | None] | None = None,
+) -> types.ModuleType:
+    """Load the launcher script as a module under a controlled environment.
+
+    A None value in env_overrides removes that variable from the environment.
+    """
     for directory in (FAKE_HOME, FAKE_CONFIG_HOME, FAKE_RUNTIME_DIR, IMPORT_CWD):
         directory.mkdir(parents=True, exist_ok=True)
     loader = importlib.machinery.SourceFileLoader(
@@ -39,20 +44,24 @@ def load_launcher() -> types.ModuleType:
     saved_argv = sys.argv
     saved_cwd = Path.cwd()
     saved_environ = os.environ.copy()
+    env: dict[str, str | None] = {
+        "HOME": str(FAKE_HOME),
+        "XDG_CACHE_HOME": str(FIXTURE_ROOT / "cache"),
+        "XDG_CONFIG_HOME": str(FAKE_CONFIG_HOME),
+        "XDG_DATA_HOME": str(FIXTURE_ROOT / "data"),
+        "XDG_RUNTIME_DIR": str(FAKE_RUNTIME_DIR),
+        "XDG_STATE_HOME": str(FIXTURE_ROOT / "state"),
+        "CARGO_HOME": str(FIXTURE_ROOT / "cargo"),
+        "RUSTUP_HOME": str(FIXTURE_ROOT / "rustup"),
+        "EDITOR": "true",
+    }
+    env.update(env_overrides or {})
     try:
-        os.environ.update(
-            {
-                "HOME": str(FAKE_HOME),
-                "XDG_CACHE_HOME": str(FIXTURE_ROOT / "cache"),
-                "XDG_CONFIG_HOME": str(FAKE_CONFIG_HOME),
-                "XDG_DATA_HOME": str(FIXTURE_ROOT / "data"),
-                "XDG_RUNTIME_DIR": str(FAKE_RUNTIME_DIR),
-                "XDG_STATE_HOME": str(FIXTURE_ROOT / "state"),
-                "CARGO_HOME": str(FIXTURE_ROOT / "cargo"),
-                "RUSTUP_HOME": str(FIXTURE_ROOT / "rustup"),
-                "EDITOR": "true",
-            }
-        )
+        for key, value in env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         sys.argv = [str(SCRIPT_PATH), "claude"]
         os.chdir(IMPORT_CWD)
         loader.exec_module(module)
@@ -104,6 +113,22 @@ class MountTests(unittest.TestCase):
         mount = launcher.Mount(Path("/src"), Path("/dst"), launcher.MountKind.BIND_RO)
 
         self.assertEqual(mount.target, Path("/dst"))
+
+
+class HomeToolsTests(unittest.TestCase):
+    """Test HOME_TOOLS construction from the environment."""
+
+    def test_editor_unset(self) -> None:
+        """Build HOME_TOOLS without an editor entry when EDITOR is unset."""
+        module = load_launcher({"EDITOR": None})
+
+        self.assertNotIn(None, module.HOME_TOOLS)
+
+    def test_editor_set(self) -> None:
+        """Include the EDITOR command in HOME_TOOLS when set."""
+        module = load_launcher({"EDITOR": "myeditor"})
+
+        self.assertIn("myeditor", module.HOME_TOOLS)
 
 
 class MemfdDataTests(unittest.TestCase):

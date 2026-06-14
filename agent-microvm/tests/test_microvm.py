@@ -4,6 +4,7 @@ import base64
 import fcntl
 import importlib.machinery
 import importlib.util
+import io
 import logging
 import os
 import stat
@@ -413,6 +414,7 @@ class MicrovmCommandTests(unittest.TestCase):
                 unittest.mock.patch.object(
                     agent_microvm, "download_file", side_effect=download
                 ),
+                unittest.mock.patch.object(agent_microvm, "resolve_minirootfs_url"),
                 unittest.mock.patch.object(
                     agent_microvm, "extract_minirootfs", side_effect=seed_rootfs
                 ),
@@ -444,6 +446,29 @@ class MicrovmCommandTests(unittest.TestCase):
                 f"{agent_microvm.PREPARE_RECIPE_VERSION}\n",
             )
             self.assertFalse(agent_microvm.staging_path(artifacts.kernel_path).exists())
+
+    def test_resolve_minirootfs_url_picks_branch_minirootfs(self) -> None:
+        """Build the minirootfs URL from the branch's latest-releases metadata."""
+        releases = (
+            "-\n"
+            "  flavor: alpine-netboot\n"
+            "  file: alpine-netboot-3.24.1-x86_64.tar.gz\n"
+            "-\n"
+            "  flavor: alpine-minirootfs\n"
+            "  file: alpine-minirootfs-3.24.1-x86_64.tar.gz\n"
+        )
+        with unittest.mock.patch.object(
+            agent_microvm.urllib.request,
+            "urlopen",
+            return_value=io.BytesIO(releases.encode()),
+        ):
+            url = agent_microvm.resolve_minirootfs_url()
+
+        self.assertEqual(
+            url,
+            f"{agent_microvm.ALPINE_RELEASE_BASE_URL}"
+            "/alpine-minirootfs-3.24.1-x86_64.tar.gz",
+        )
 
     def test_ensure_artifacts_builds_once_under_concurrency(self) -> None:
         """Serialize racing preparers so a stale rootfs is regenerated a single time."""
@@ -496,6 +521,7 @@ class MicrovmCommandTests(unittest.TestCase):
                 unittest.mock.patch.object(
                     agent_microvm, "download_file", side_effect=download
                 ),
+                unittest.mock.patch.object(agent_microvm, "resolve_minirootfs_url"),
                 unittest.mock.patch.object(
                     agent_microvm, "extract_minirootfs", side_effect=seed_rootfs
                 ),

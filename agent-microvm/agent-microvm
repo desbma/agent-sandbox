@@ -16,6 +16,7 @@ import fcntl
 import ipaddress
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
 SCRIPT_NAME = Path(__file__).resolve().name
 LOGGER = logging.getLogger(SCRIPT_NAME)
 ALPINE_BRANCH = "v3.24"
-ALPINE_VERSION = "3.24.0"
 ALPINE_ARCH = "x86_64"
 ALPINE_CDN = "https://dl-cdn.alpinelinux.org/alpine"
 ALPINE_REPOSITORIES = ("main", "community")
@@ -102,9 +102,7 @@ ALPINE_PACKAGES = tuple(sorted((*HARNESS_PACKAGES, *AGENT_PACKAGES)))
 ALPINE_RELEASE_BASE_URL = f"{ALPINE_CDN}/{ALPINE_BRANCH}/releases/{ALPINE_ARCH}"
 ALPINE_KERNEL_URL = f"{ALPINE_RELEASE_BASE_URL}/netboot/vmlinuz-virt"
 ALPINE_MODLOOP_URL = f"{ALPINE_RELEASE_BASE_URL}/netboot/modloop-virt"
-ALPINE_MINIROOTFS_URL = (
-    f"{ALPINE_RELEASE_BASE_URL}/alpine-minirootfs-{ALPINE_VERSION}-{ALPINE_ARCH}.tar.gz"
-)
+ALPINE_LATEST_RELEASES_URL = f"{ALPINE_RELEASE_BASE_URL}/latest-releases.yaml"
 ALPINE_REPOSITORY_URLS = tuple(
     f"{ALPINE_CDN}/{ALPINE_BRANCH}/{repository}" for repository in ALPINE_REPOSITORIES
 )
@@ -401,6 +399,20 @@ def download_file(url: str, destination: Path) -> None:
         shutil.copyfileobj(response, handle)
 
 
+def resolve_minirootfs_url() -> str:
+    """Resolve the minirootfs URL for the latest patch release of the target branch."""
+    with urllib.request.urlopen(ALPINE_LATEST_RELEASES_URL) as response:
+        releases = response.read().decode("utf-8")
+    match = re.search(
+        rf"alpine-minirootfs-\d+\.\d+\.\d+-{ALPINE_ARCH}\.tar\.gz", releases
+    )
+    if match is None:
+        raise RuntimeError(
+            f"No minirootfs release listed at {ALPINE_LATEST_RELEASES_URL}"
+        )
+    return f"{ALPINE_RELEASE_BASE_URL}/{match.group()}"
+
+
 def minirootfs_tar_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
     """Sanitize a minirootfs tar member, dropping device and special files.
 
@@ -666,7 +678,7 @@ def prepare_guest(artifacts: GuestArtifacts) -> None:
         modloop_path = build_path / "modloop"
         tree = build_path / "tree"
         tree.mkdir()
-        download_file(ALPINE_MINIROOTFS_URL, rootfs_archive)
+        download_file(resolve_minirootfs_url(), rootfs_archive)
         download_file(ALPINE_MODLOOP_URL, modloop_path)
         extract_minirootfs(rootfs_archive, tree)
         install_alpine_packages(tree)

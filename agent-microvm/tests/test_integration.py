@@ -82,11 +82,12 @@ class MicrovmIntegrationTests(unittest.TestCase):
             raise RuntimeError(f"Warm-up boot failed: {result.stderr}")
 
     def test_boots_and_reports_alpine_version(self) -> None:
-        """Boot the guest and read its Alpine release, matching the pinned version."""
+        """Boot the guest and read its Alpine release, matching the pinned branch."""
         result = run_guest(("cat", "/etc/alpine-release"))
 
         self.assertEqual(result.returncode, 0)
-        self.assertTrue(result.stdout.strip().startswith(agent_microvm.ALPINE_VERSION))
+        release = agent_microvm.ALPINE_BRANCH.removeprefix("v")
+        self.assertTrue(result.stdout.strip().startswith(f"{release}."))
 
     def test_exit_code_propagates(self) -> None:
         """Propagate the guest command's exit status back to the launcher."""

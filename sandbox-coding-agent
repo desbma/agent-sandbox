@@ -259,12 +259,16 @@ MOUNTS: list[Mount] = [
     # read-only binds
     Mount(Path("/opt/intel"), None, MountKind.BIND_RO),
     Mount(Path("/usr"), None, MountKind.BIND_RO),
+    Mount(Path("/var/lib/dpkg"), None, MountKind.BIND_RO),
     Mount(Path("/var/lib/ghc"), None, MountKind.BIND_RO),
     # system config
     Mount(Path("/etc/alternatives"), None, MountKind.BIND_RO),
     Mount(Path("/etc/ca-certificates"), None, MountKind.BIND_RO),
     Mount(Path("/etc/fonts"), None, MountKind.BIND_RO),
     Mount(Path("/etc/hosts"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/ld.so.cache"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/ld.so.conf"), None, MountKind.BIND_RO),
+    Mount(Path("/etc/ld.so.conf.d"), None, MountKind.BIND_RO),
     Mount(Path("/etc/lsb-release"), None, MountKind.BIND_RO),
     Mount(Path("/etc/makepkg.conf"), None, MountKind.BIND_RO),
     Mount(Path("/etc/man_db.conf"), None, MountKind.BIND_RO),

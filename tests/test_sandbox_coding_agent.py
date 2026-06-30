@@ -419,6 +419,46 @@ class GetJjDefaultWsRootTests(TempDirTestCase):
             self.assertEqual(launcher.get_jj_default_ws_root(), repo)
 
 
+class ClaudePathHashTests(unittest.TestCase):
+    """Test the base36 path hash mirroring Claude Code's slug disambiguation."""
+
+    def test_known_hashes(self) -> None:
+        """Reproduce hashes computed by Claude Code's own algorithm."""
+        self.assertEqual(
+            launcher.claude_path_hash("/home/user/My Project (v2)!"), "gzll6s"
+        )
+        self.assertEqual(
+            launcher.claude_path_hash("/srv/" + "nested/" * 40 + "repo"), "fn0i87"
+        )
+
+    def test_empty_path_hashes_to_zero(self) -> None:
+        """Hash the empty path to the single zero digit."""
+        self.assertEqual(launcher.claude_path_hash(""), "0")
+
+
+class ClaudeProjectSlugTests(unittest.TestCase):
+    """Test the per-project slug encoding mirroring Claude Code's LE()."""
+
+    def test_replaces_non_alphanumeric_with_dash(self) -> None:
+        """Map every non-alphanumeric character to a dash."""
+        self.assertEqual(
+            launcher.claude_project_slug(Path("/home/user/projects/my-repo")),
+            "-home-user-projects-my-repo",
+        )
+        self.assertEqual(
+            launcher.claude_project_slug(Path("/home/user/My Project (v2)!")),
+            "-home-user-My-Project--v2--",
+        )
+
+    def test_long_path_truncated_with_hash_suffix(self) -> None:
+        """Truncate slugs over the length cap and append the path hash."""
+        slug = launcher.claude_project_slug(Path("/srv/" + "nested/" * 40 + "repo"))
+
+        self.assertEqual(len(slug), launcher.CLAUDE_SLUG_MAX_LEN + len("-fn0i87"))
+        self.assertTrue(slug.startswith("-srv-nested-nested-"))
+        self.assertTrue(slug.endswith("-fn0i87"))
+
+
 class ConfirmCwdTests(TempDirTestCase):
     """Test startup directory confirmation."""
 

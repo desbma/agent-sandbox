@@ -19,8 +19,10 @@ import enum
 import grp
 import os
 import pwd
+import re
 import shlex
 import shutil
+import string
 import subprocess
 import sys
 from pathlib import Path
@@ -89,6 +91,28 @@ def get_jj_default_ws_root() -> Path | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return Path(out.stdout.strip())
+
+
+def claude_path_hash(path: str) -> str:
+    """Compute Claude Code's base36 path hash that disambiguates truncated slugs."""
+    h = 0
+    for char in path:
+        h = (h << 5) - h + ord(char)
+        h = ((h + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+    n = abs(h)
+    out = ""
+    while n:
+        n, remainder = divmod(n, 36)
+        out = BASE36_DIGITS[remainder] + out
+    return out or "0"
+
+
+def claude_project_slug(path: Path) -> str:
+    """Encode a path the way Claude Code names its per-project state directory."""
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(path))
+    if len(slug) <= CLAUDE_SLUG_MAX_LEN:
+        return slug
+    return f"{slug[:CLAUDE_SLUG_MAX_LEN]}-{claude_path_hash(str(path))}"
 
 
 def fatal_error(msg: str) -> None:
@@ -247,6 +271,10 @@ XDG_STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
 PROXY_CA_BUNDLE = XDG_RUNTIME_DIR / "agent-proxy/ca-bundle.crt"
 PROXY_ADDRESS = "127.0.0.1:8085"
 GH_PLACEHOLDER_TOKEN = "agent-proxy-placeholder"
+
+# Claude Code per-project slug encoding (mirrors its internal LE())
+BASE36_DIGITS = string.digits + string.ascii_lowercase
+CLAUDE_SLUG_MAX_LEN = 200
 
 # static mounts in sandbox
 MOUNTS: list[Mount] = [
@@ -463,6 +491,17 @@ if __name__ == "__main__":
         for subdir in [".jj", ".git"]:
             mounts.append(Mount(jj_default_ws_root / subdir, None, MountKind.BIND_RO))
 
+    # remap claude memory from different workspaces of the same repo
+    memory_env: dict[str, str] = {}
+    if (jj_default_ws_root is not None) and (AGENT == "claude"):
+        # internal and undocumented override
+        memory_env["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"] = str(
+            HOME
+            / ".claude/projects"
+            / claude_project_slug(jj_default_ws_root)
+            / "memory"
+        )
+
     # bind target binary
     agent_bin = shutil.which(sys.argv[1])
     assert agent_bin is not None
@@ -597,7 +636,7 @@ if __name__ == "__main__":
 
     # env
     bwrap_args.append("--clearenv")
-    for env_k, env_v in (ENV_SET | proxy_env).items():
+    for env_k, env_v in (ENV_SET | proxy_env | memory_env).items():
         bwrap_args += ["--setenv", env_k, env_v]
     for env_k in ENV_FORWARD + [
         k for k in os.environ if k.startswith(f"{AGENT.upper()}_")

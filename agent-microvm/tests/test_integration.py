@@ -58,6 +58,18 @@ def run_guest(
     )
 
 
+def parse_cpu_range_list(spec: str) -> set[int]:
+    """Expand a sysfs CPU range list like "0-1,4" into a set of indices."""
+    cpus: set[int] = set()
+    for part in spec.split(","):
+        if "-" in part:
+            low, high = part.split("-")
+            cpus.update(range(int(low), int(high) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
 def peer_wait_script(marker_path: Path, target_path: Path) -> str:
     """Return a shell script announcing a marker file then awaiting the peer's."""
     wait = (
@@ -101,6 +113,31 @@ class MicrovmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "0")
+
+    def test_guest_hyperthread_siblings_are_consecutive(self) -> None:
+        """Confirm the guest numbers each core's hyperthreads as one aligned block.
+
+        The interleaved host pin map relies on this: guest core k's vCPUs must be
+        the consecutive indices [k*threads, k*threads + threads). Without an SMT
+        topology the check holds vacuously with one thread per core.
+        """
+        script = (
+            "for d in /sys/devices/system/cpu/cpu[0-9]*; do "
+            "name=${d##*/}; "
+            'printf "%s:%s\\n" "${name#cpu}" '
+            '"$(cat "$d/topology/thread_siblings_list")"; '
+            "done"
+        )
+        result = run_guest(("sh", "-c", script))
+
+        self.assertEqual(result.returncode, 0)
+        for line in result.stdout.splitlines():
+            index_text, siblings_text = line.split(":", 1)
+            index = int(index_text)
+            siblings = parse_cpu_range_list(siblings_text)
+            thread_count = len(siblings)
+            core_base = (index // thread_count) * thread_count
+            self.assertEqual(siblings, set(range(core_base, core_base + thread_count)))
 
     @unittest.skipIf(
         GITHUB_HOSTED_RUNNER, "GitHub-hosted runners drop inbound ICMP echo replies"

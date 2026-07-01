@@ -127,6 +127,8 @@ GUEST_USR_OVERLAY_WORK = Path("/run/usr-overlay/work")
 SSH_KEY_TYPE = "ed25519"
 HOST_RESOLV_CONF = Path("/etc/resolv.conf")
 HOST_CPU_TOPOLOGY_PATH = Path("/run/sandbox-coding-agent/cpu-topology")
+# QEMU's KVM vCPU thread comm, capturing the guest CPU index it emulates.
+QEMU_VCPU_COMM_PATTERN = re.compile(r"CPU (\d+)/KVM")
 # Sentinel nameserver advertised to the guest; passt intercepts DNS sent to it
 # and forwards to the host resolver. RFC 5737 TEST-NET-1, so it never collides
 # with a real host subnet and the guest routes it to passt via the gateway.
@@ -140,6 +142,7 @@ BYTES_PER_MIB = 1024 * 1024
 POLL_SECONDS = 0.05
 VIRTIOFSD_SOCKET_TIMEOUT_SECONDS = 3.0
 GUEST_READY_TIMEOUT_SECONDS = 30.0
+VCPU_DISCOVERY_TIMEOUT_SECONDS = 5.0
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
 PREPARE_LOCK_FILENAME = "prepare.lock"
@@ -178,6 +181,8 @@ class CpuTopology:
     sockets: int
     cores: int
     threads: int
+    # Host CPU index per guest vCPU, or None to leave vCPUs unpinned.
+    pin: tuple[int, ...] | None = None
 
     @property
     def qemu_smp(self) -> str:
@@ -304,12 +309,17 @@ def default_cpu_topology() -> CpuTopology:
         text = HOST_CPU_TOPOLOGY_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
         return CpuTopology(sockets=1, cores=default_cpu_count(), threads=1)
-    fields: dict[str, int] = {}
-    for item in text.strip().split(","):
-        key, value = item.split("=", 1)
-        fields[key] = int(value)
+    counts_line, _, pin_line = text.strip().partition("\npin=")
+    counts = {
+        key: int(value)
+        for key, value in (pair.split("=", 1) for pair in counts_line.split(","))
+    }
+    pin = tuple(int(cpu) for cpu in pin_line.split(",")) if pin_line else None
     return CpuTopology(
-        sockets=fields["sockets"], cores=fields["cores"], threads=fields["threads"]
+        sockets=counts["sockets"],
+        cores=counts["cores"],
+        threads=counts["threads"],
+        pin=pin,
     )
 
 
@@ -1146,6 +1156,8 @@ def run_processes(
             )
             trace.mark(HOST_TRACE_QEMU_LAUNCHED)
             try:
+                if config.cpu_topology.pin is not None:
+                    pin_vcpus(qemu_process, config.cpu_topology.pin)
                 wait_for_guest_ready(qemu_process, console_log_path)
                 trace.mark(HOST_TRACE_GUEST_READY)
                 return run_ssh_session(ssh_command)
@@ -1239,6 +1251,41 @@ def wait_for_guest_ready(
         ready,
         "Timed out waiting for the guest to become ready",
     )
+
+
+def discover_vcpu_threads(
+    qemu_process: subprocess.Popen[bytes], count: int
+) -> dict[int, int]:
+    """Map each guest vCPU index to its QEMU thread id, polling until all appear."""
+    threads: dict[int, int] = {}
+    task_dir = Path("/proc") / str(qemu_process.pid) / "task"
+
+    def ready() -> bool:
+        """Report whether every vCPU thread is named, raising if QEMU exited early."""
+        ensure_processes_alive(
+            (qemu_process,), "QEMU exited before its vCPU threads appeared"
+        )
+        for tid_path in task_dir.iterdir():
+            try:
+                comm = (tid_path / "comm").read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            match = QEMU_VCPU_COMM_PATTERN.fullmatch(comm.strip())
+            if match is not None:
+                threads[int(match.group(1))] = int(tid_path.name)
+        return len(threads) == count
+
+    poll_until(
+        VCPU_DISCOVERY_TIMEOUT_SECONDS, ready, "Timed out waiting for QEMU vCPU threads"
+    )
+    return threads
+
+
+def pin_vcpus(qemu_process: subprocess.Popen[bytes], pin: Sequence[int]) -> None:
+    """Bind each guest vCPU thread to its designated host CPU."""
+    threads = discover_vcpu_threads(qemu_process, len(pin))
+    for index, host_cpu in enumerate(pin):
+        os.sched_setaffinity(threads[index], {host_cpu})
 
 
 def terminate_process(process: subprocess.Popen[bytes]) -> None:

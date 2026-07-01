@@ -361,7 +361,9 @@ class GenCpuTopologyTests(TempDirTestCase):
         """Report one socket, two cores, two threads for a hyperthreaded quad."""
         layout = {0: (0, 0), 1: (0, 1), 2: (0, 0), 3: (0, 1)}
 
-        self.assertEqual(self.topology_for(layout), b"sockets=1,cores=2,threads=2")
+        self.assertEqual(
+            self.topology_for(layout), b"sockets=1,cores=2,threads=2\npin=0,2,1,3"
+        )
 
     def test_dual_socket_with_smt(self) -> None:
         """Report two sockets, two cores, two threads across two packages."""
@@ -376,7 +378,19 @@ class GenCpuTopologyTests(TempDirTestCase):
             7: (1, 1),
         }
 
-        self.assertEqual(self.topology_for(layout), b"sockets=2,cores=2,threads=2")
+        self.assertEqual(
+            self.topology_for(layout),
+            b"sockets=2,cores=2,threads=2\npin=0,2,1,3,4,6,5,7",
+        )
+
+    def test_pin_groups_strided_hyperthread_siblings(self) -> None:
+        """Order the pin map so each core's strided siblings become adjacent vCPUs."""
+        layout = {cpu: (0, cpu % 4) for cpu in range(8)}
+
+        self.assertEqual(
+            self.topology_for(layout),
+            b"sockets=1,cores=4,threads=2\npin=0,4,1,5,2,6,3,7",
+        )
 
     def test_returns_none_without_sysfs(self) -> None:
         """Report no topology when the online CPU file is absent."""

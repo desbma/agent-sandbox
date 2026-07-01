@@ -6,6 +6,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import sys
@@ -424,7 +425,7 @@ class GeneratedFileTests(SandboxTestCase):
         SYS_CPU_ONLINE.is_file(), "host sysfs CPU topology is unavailable"
     )
     def test_cpu_topology(self) -> None:
-        """Share the host CPU socket/core/thread counts for the guest microvm launcher."""
+        """Share the host CPU counts and the guest vCPU pin map for the microvm launcher."""
         report = self.run_probe(
             [
                 Op("topology", OpKind.READ, "/run/sandbox-coding-agent/cpu-topology"),
@@ -433,10 +434,15 @@ class GeneratedFileTests(SandboxTestCase):
             agent="claude",
         )
 
-        self.assertRegex(
-            self.report_str(report, "topology"),
-            r"^sockets=[1-9]\d*,cores=[1-9]\d*,threads=[1-9]\d*$",
+        counts_line, pin_line = self.report_str(report, "topology").splitlines()
+        counts = re.fullmatch(
+            r"sockets=([1-9]\d*),cores=([1-9]\d*),threads=([1-9]\d*)", counts_line
         )
+        assert counts is not None
+        self.assertRegex(pin_line, r"^pin=\d+(,\d+)*$")
+        pin = pin_line.removeprefix("pin=").split(",")
+        sockets, cores, threads = (int(group) for group in counts.groups())
+        self.assertEqual(len(set(pin)), sockets * cores * threads)
         self.assertEqual(report["mode"], "0o600")
 
 

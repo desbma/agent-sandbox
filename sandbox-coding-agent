@@ -217,22 +217,27 @@ def parse_cpu_list(spec: str) -> list[int]:
 
 
 def gen_cpu_topology() -> bytes | None:
-    """Encode the host socket/core/thread counts for the microvm, or None if unreadable."""
+    """Encode the host socket/core/thread counts and vCPU pin map, or None if unreadable.
+
+    The pin line lists, in guest vCPU order, the host CPU each vCPU binds to so
+    that a guest core's hyperthreads land on one host physical core's threads.
+    """
     online_path = SYS_CPU_DIR / "online"
     if not online_path.is_file():
         return None
     online_cpus = parse_cpu_list(online_path.read_text().strip())
-    packages: set[int] = set()
-    cores: set[tuple[int, int]] = set()
+    cores: dict[tuple[int, int], list[int]] = collections.defaultdict(list)
     for cpu in online_cpus:
         topology = SYS_CPU_DIR / f"cpu{cpu}/topology"
         package = int((topology / "physical_package_id").read_text())
-        cores.add((package, int((topology / "core_id").read_text())))
-        packages.add(package)
-    sockets = len(packages)
+        core = int((topology / "core_id").read_text())
+        cores[(package, core)].append(cpu)
+    sockets = len({package for package, _ in cores})
     cores_per_socket = len(cores) // sockets
-    threads = len(online_cpus) // (sockets * cores_per_socket)
-    return f"sockets={sockets},cores={cores_per_socket},threads={threads}".encode()
+    threads = len(online_cpus) // len(cores)
+    pin = ",".join(str(cpu) for key in sorted(cores) for cpu in sorted(cores[key]))
+    counts = f"sockets={sockets},cores={cores_per_socket},threads={threads}"
+    return f"{counts}\npin={pin}".encode()
 
 
 def gen_global_agents_md(

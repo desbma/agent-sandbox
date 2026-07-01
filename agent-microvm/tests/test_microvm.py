@@ -1192,6 +1192,53 @@ class MicrovmCommandTests(unittest.TestCase):
                 agent_microvm.CpuTopology(sockets=1, cores=12, threads=1),
             )
 
+    def test_default_cpu_topology_parses_pin_map(self) -> None:
+        """Parse the vCPU pin map the sandbox launcher appends after the counts."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            topology_path = Path(temporary_directory) / "cpu-topology"
+            topology_path.write_text(
+                "sockets=1,cores=2,threads=2\npin=0,2,1,3", encoding="utf-8"
+            )
+            with unittest.mock.patch.object(
+                agent_microvm, "HOST_CPU_TOPOLOGY_PATH", topology_path
+            ):
+                self.assertEqual(
+                    agent_microvm.default_cpu_topology(),
+                    agent_microvm.CpuTopology(
+                        sockets=1, cores=2, threads=2, pin=(0, 2, 1, 3)
+                    ),
+                )
+
+    def test_qemu_vcpu_comm_pattern_extracts_guest_cpu_index(self) -> None:
+        """Match KVM vCPU thread names and ignore other QEMU threads."""
+        match = agent_microvm.QEMU_VCPU_COMM_PATTERN.fullmatch("CPU 12/KVM")
+
+        assert match is not None
+        self.assertEqual(match.group(1), "12")
+        self.assertIsNone(
+            agent_microvm.QEMU_VCPU_COMM_PATTERN.fullmatch("qemu-system-x86")
+        )
+
+    def test_pin_vcpus_binds_each_thread_to_its_host_cpu(self) -> None:
+        """Bind each guest vCPU thread to the host CPU named at its pin-map index."""
+        pin = (3, 2, 1, 0)
+        vcpu_tids = {0: 100, 1: 101, 2: 102, 3: 103}
+        process = unittest.mock.Mock(pid=4321)
+        calls: list[tuple[int, set[int]]] = []
+        with (
+            unittest.mock.patch.object(
+                agent_microvm, "discover_vcpu_threads", return_value=vcpu_tids
+            ),
+            unittest.mock.patch.object(
+                agent_microvm.os,
+                "sched_setaffinity",
+                side_effect=lambda tid, mask: calls.append((tid, mask)),
+            ),
+        ):
+            agent_microvm.pin_vcpus(process, pin)
+
+        self.assertEqual(calls, [(100, {3}), (101, {2}), (102, {1}), (103, {0})])
+
     def test_default_memory_has_eight_gib_floor(self) -> None:
         """Use at least eight GiB of guest memory."""
         page_size = 4096

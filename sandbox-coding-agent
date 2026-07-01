@@ -204,6 +204,37 @@ def gen_group() -> bytes:
     return bytes(b)
 
 
+def parse_cpu_list(spec: str) -> list[int]:
+    """Expand a sysfs CPU range list like "0-3,8,10-11" into individual indices."""
+    cpus: list[int] = []
+    for part in spec.split(","):
+        if "-" in part:
+            low, high = part.split("-")
+            cpus.extend(range(int(low), int(high) + 1))
+        else:
+            cpus.append(int(part))
+    return cpus
+
+
+def gen_cpu_topology() -> bytes | None:
+    """Encode the host socket/core/thread counts for the microvm, or None if unreadable."""
+    online_path = SYS_CPU_DIR / "online"
+    if not online_path.is_file():
+        return None
+    online_cpus = parse_cpu_list(online_path.read_text().strip())
+    packages: set[int] = set()
+    cores: set[tuple[int, int]] = set()
+    for cpu in online_cpus:
+        topology = SYS_CPU_DIR / f"cpu{cpu}/topology"
+        package = int((topology / "physical_package_id").read_text())
+        cores.add((package, int((topology / "core_id").read_text())))
+        packages.add(package)
+    sockets = len(packages)
+    cores_per_socket = len(cores) // sockets
+    threads = len(online_cpus) // (sockets * cores_per_socket)
+    return f"sockets={sockets},cores={cores_per_socket},threads={threads}".encode()
+
+
 def gen_global_agents_md(
     exchange_dir: Path | None,
     *,
@@ -275,6 +306,10 @@ GH_PLACEHOLDER_TOKEN = "agent-proxy-placeholder"
 # Claude Code per-project slug encoding (mirrors its internal LE())
 BASE36_DIGITS = string.digits + string.ascii_lowercase
 CLAUDE_SLUG_MAX_LEN = 200
+
+# host CPU topology, read from sysfs and handed to the guest microvm launcher
+SYS_CPU_DIR = Path("/sys/devices/system/cpu")
+CPU_TOPOLOGY_PATH = Path("/run/sandbox-coding-agent/cpu-topology")
 
 # static mounts in sandbox
 MOUNTS: list[Mount] = [
@@ -600,6 +635,9 @@ if __name__ == "__main__":
             executable=True,
         ),
     }
+    cpu_topology = gen_cpu_topology()
+    if cpu_topology is not None:
+        files[CPU_TOPOLOGY_PATH] = File(cpu_topology)
     try:
         global_agents_md_path = GLOBAL_AGENTS_MD[AGENT]
     except KeyError:

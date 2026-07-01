@@ -31,6 +31,7 @@ JJ_WRAPPER = (
     'exec $(type -aP -- jj | uniq | tail -n +2 | head -n 1) --ignore-working-copy "$@"\n'
 )
 EXECUTABLE_STUB = "#!/bin/sh\nexit 0\n"
+SYS_CPU_ONLINE = Path("/sys/devices/system/cpu/online")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -418,6 +419,25 @@ class GeneratedFileTests(SandboxTestCase):
 
         self.assertEqual(report["wrapper"], JJ_WRAPPER)
         self.assertEqual(report["mode"], "0o700")
+
+    @unittest.skipUnless(
+        SYS_CPU_ONLINE.is_file(), "host sysfs CPU topology is unavailable"
+    )
+    def test_cpu_topology(self) -> None:
+        """Share the host CPU socket/core/thread counts for the guest microvm launcher."""
+        report = self.run_probe(
+            [
+                Op("topology", OpKind.READ, "/run/sandbox-coding-agent/cpu-topology"),
+                Op("mode", OpKind.MODE, "/run/sandbox-coding-agent/cpu-topology"),
+            ],
+            agent="claude",
+        )
+
+        self.assertRegex(
+            self.report_str(report, "topology"),
+            r"^sockets=[1-9]\d*,cores=[1-9]\d*,threads=[1-9]\d*$",
+        )
+        self.assertEqual(report["mode"], "0o600")
 
 
 class EnvironmentTests(SandboxTestCase):

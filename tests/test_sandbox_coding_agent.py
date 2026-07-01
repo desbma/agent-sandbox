@@ -322,6 +322,68 @@ class ProxySetupTests(unittest.TestCase):
         )
 
 
+class ParseCpuListTests(unittest.TestCase):
+    """Test sysfs CPU range list expansion."""
+
+    def test_expands_ranges_and_singletons(self) -> None:
+        """Expand mixed ranges and single indices into a flat list."""
+        self.assertEqual(
+            launcher.parse_cpu_list("0-3,8,10-11"), [0, 1, 2, 3, 8, 10, 11]
+        )
+
+    def test_single_cpu(self) -> None:
+        """Expand a lone index into a one-element list."""
+        self.assertEqual(launcher.parse_cpu_list("0"), [0])
+
+
+class GenCpuTopologyTests(TempDirTestCase):
+    """Test host CPU topology extraction from sysfs."""
+
+    def write_sysfs(self, layout: dict[int, tuple[int, int]]) -> Path:
+        """Build a fake /sys/devices/system/cpu tree from a cpu -> (package, core) map."""
+        cpu_root = self.make_temp_dir()
+        online = ",".join(str(cpu) for cpu in sorted(layout))
+        (cpu_root / "online").write_text(f"{online}\n")
+        for cpu, (package, core) in layout.items():
+            topology = cpu_root / f"cpu{cpu}" / "topology"
+            topology.mkdir(parents=True)
+            (topology / "physical_package_id").write_text(f"{package}\n")
+            (topology / "core_id").write_text(f"{core}\n")
+        return cpu_root
+
+    def topology_for(self, layout: dict[int, tuple[int, int]]) -> bytes | None:
+        """Run gen_cpu_topology against a fake sysfs tree built from the layout."""
+        cpu_root = self.write_sysfs(layout)
+        with unittest.mock.patch.object(launcher, "SYS_CPU_DIR", cpu_root):
+            return launcher.gen_cpu_topology()
+
+    def test_single_socket_with_smt(self) -> None:
+        """Report one socket, two cores, two threads for a hyperthreaded quad."""
+        layout = {0: (0, 0), 1: (0, 1), 2: (0, 0), 3: (0, 1)}
+
+        self.assertEqual(self.topology_for(layout), b"sockets=1,cores=2,threads=2")
+
+    def test_dual_socket_with_smt(self) -> None:
+        """Report two sockets, two cores, two threads across two packages."""
+        layout = {
+            0: (0, 0),
+            1: (0, 1),
+            2: (0, 0),
+            3: (0, 1),
+            4: (1, 0),
+            5: (1, 1),
+            6: (1, 0),
+            7: (1, 1),
+        }
+
+        self.assertEqual(self.topology_for(layout), b"sockets=2,cores=2,threads=2")
+
+    def test_returns_none_without_sysfs(self) -> None:
+        """Report no topology when the online CPU file is absent."""
+        with unittest.mock.patch.object(launcher, "SYS_CPU_DIR", self.make_temp_dir()):
+            self.assertIsNone(launcher.gen_cpu_topology())
+
+
 class PromptBoolTests(unittest.TestCase):
     """Test interactive boolean prompting."""
 

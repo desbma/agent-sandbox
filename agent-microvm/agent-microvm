@@ -126,6 +126,7 @@ GUEST_USR_OVERLAY_UPPER = Path("/run/usr-overlay/upper")
 GUEST_USR_OVERLAY_WORK = Path("/run/usr-overlay/work")
 SSH_KEY_TYPE = "ed25519"
 HOST_RESOLV_CONF = Path("/etc/resolv.conf")
+HOST_CPU_TOPOLOGY_PATH = Path("/run/sandbox-coding-agent/cpu-topology")
 # Sentinel nameserver advertised to the guest; passt intercepts DNS sent to it
 # and forwards to the host resolver. RFC 5737 TEST-NET-1, so it never collides
 # with a real host subnet and the guest routes it to passt via the gateway.
@@ -171,6 +172,24 @@ class VirtiofsShare:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class CpuTopology:
+    """Guest processor layout for QEMU -smp."""
+
+    sockets: int
+    cores: int
+    threads: int
+
+    @property
+    def qemu_smp(self) -> str:
+        """Return the QEMU -smp value describing this layout."""
+        cpus = self.sockets * self.cores * self.threads
+        return (
+            f"cpus={cpus},sockets={self.sockets}"
+            f",cores={self.cores},threads={self.threads}"
+        )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class MicrovmConfig:
     """Describe a QEMU microvm session."""
 
@@ -180,7 +199,7 @@ class MicrovmConfig:
     passt_path: Path
     dns_forward_target: str | None
     memory_mib: int
-    cpu_count: int
+    cpu_topology: CpuTopology
     shares: tuple[VirtiofsShare, ...]
     ssh_host_port: int
     ssh_public_key: str
@@ -277,6 +296,21 @@ def default_artifacts() -> GuestArtifacts:
 def default_cpu_count() -> int:
     """Return the host CPU count available to the guest."""
     return len(os.sched_getaffinity(0))
+
+
+def default_cpu_topology() -> CpuTopology:
+    """Return the host CPU topology shared by the sandbox launcher, or a flat fallback."""
+    try:
+        text = HOST_CPU_TOPOLOGY_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CpuTopology(sockets=1, cores=default_cpu_count(), threads=1)
+    fields: dict[str, int] = {}
+    for item in text.strip().split(","):
+        key, value = item.split("=", 1)
+        fields[key] = int(value)
+    return CpuTopology(
+        sockets=fields["sockets"], cores=fields["cores"], threads=fields["threads"]
+    )
 
 
 def default_memory_mib() -> int:
@@ -755,7 +789,7 @@ def build_qemu_command(config: MicrovmConfig) -> list[str]:
         "-cpu",
         "host",
         "-smp",
-        str(config.cpu_count),
+        config.cpu_topology.qemu_smp,
         "-m",
         f"{config.memory_mib}M",
         "-object",
@@ -997,7 +1031,7 @@ def build_run_microvm_config(  # noqa: PLR0913
         passt_path=passt_path,
         dns_forward_target=dns_forward_target,
         memory_mib=default_memory_mib(),
-        cpu_count=default_cpu_count(),
+        cpu_topology=default_cpu_topology(),
         shares=(workspace_share, exchange_share),
         ssh_host_port=ssh_host_port,
         ssh_public_key=public_key,

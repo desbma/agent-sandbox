@@ -39,7 +39,7 @@ SSH_HOST_PORT = 49152
 DNS_FORWARD_TARGET = "127.0.0.53"
 PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAExampleKeyData comment"
 MEMORY_MIB = 1024
-CPU_COUNT = 2
+CPU_TOPOLOGY = agent_microvm.CpuTopology(sockets=1, cores=16, threads=2)
 HOST_UID = 1000
 HOST_GID = 1000
 EXECUTABLE_MODE = 0o700
@@ -101,7 +101,7 @@ def sample_microvm_config(
         passt_path=PASST_PATH,
         dns_forward_target=dns_forward_target,
         memory_mib=MEMORY_MIB,
-        cpu_count=CPU_COUNT,
+        cpu_topology=CPU_TOPOLOGY,
         shares=(workspace_share(),),
         ssh_host_port=SSH_HOST_PORT,
         ssh_public_key=public_key,
@@ -1150,6 +1150,47 @@ class MicrovmCommandTests(unittest.TestCase):
         ):
             self.assertEqual(agent_microvm.default_cpu_count(), 12)
             self.assertEqual(agent_microvm.default_memory_mib(), 16 * 1024)
+
+    def test_cpu_topology_qemu_smp_multiplies_out_cpu_count(self) -> None:
+        """Render an -smp value whose cpus count is sockets*cores*threads."""
+        topology = agent_microvm.CpuTopology(sockets=2, cores=8, threads=2)
+
+        self.assertEqual(topology.qemu_smp, "cpus=32,sockets=2,cores=8,threads=2")
+
+    def test_qemu_command_sets_smp_from_topology(self) -> None:
+        """Pass the host socket/core/thread layout to QEMU -smp."""
+        command = agent_microvm.build_qemu_command(sample_microvm_config())
+
+        self.assertEqual(command[command.index("-smp") + 1], CPU_TOPOLOGY.qemu_smp)
+
+    def test_default_cpu_topology_reads_host_file(self) -> None:
+        """Parse the socket/core/thread counts the sandbox launcher shares."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            topology_path = Path(temporary_directory) / "cpu-topology"
+            topology_path.write_text("sockets=2,cores=4,threads=2", encoding="utf-8")
+            with unittest.mock.patch.object(
+                agent_microvm, "HOST_CPU_TOPOLOGY_PATH", topology_path
+            ):
+                self.assertEqual(
+                    agent_microvm.default_cpu_topology(),
+                    agent_microvm.CpuTopology(sockets=2, cores=4, threads=2),
+                )
+
+    def test_default_cpu_topology_falls_back_to_flat_count(self) -> None:
+        """Expose the host CPU count as flat single-thread sockets without the file."""
+        missing = Path("/nonexistent") / "cpu-topology"
+        with (
+            unittest.mock.patch.object(
+                agent_microvm, "HOST_CPU_TOPOLOGY_PATH", missing
+            ),
+            unittest.mock.patch.object(
+                agent_microvm.os, "sched_getaffinity", return_value=set(range(12))
+            ),
+        ):
+            self.assertEqual(
+                agent_microvm.default_cpu_topology(),
+                agent_microvm.CpuTopology(sockets=1, cores=12, threads=1),
+            )
 
     def test_default_memory_has_eight_gib_floor(self) -> None:
         """Use at least eight GiB of guest memory."""

@@ -5,18 +5,19 @@ extend-include = ["agent-microvm/agent-microvm", "agent-proxy/agent-proxy", "san
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "COM812",
-    "D203",
-    "D213",
-    "E501",
-    "EM",
-    "INP001",
-    "PLW1510",
-    "PT",
-    "S",
-    "T201",
-    "TRY003",
-    "UP022",
+    "C401",     # unnecessary-generator-set
+    "COM812",   # missing-trailing-comma
+    "D203",     # incorrect-blank-line-before-class
+    "D213",     # multi-line-summary-second-line
+    "E501",     # line-too-long
+    "EM",       # flake8-errmsg
+    "INP001",   # implicit-namespace-package
+    "PLW1510",  # subprocess-run-without-check
+    "PT",       # flake8-pytest-style
+    "S",        # flake8-bandit
+    "T201",     # print
+    "TRY003",   # raise-vanilla-args
+    "UP022",    # replace-stdout-stderr
 ]
 
 [tool.ty.src]

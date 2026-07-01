@@ -392,6 +392,15 @@ class GenCpuTopologyTests(TempDirTestCase):
             b"sockets=1,cores=4,threads=2\npin=0,4,1,5,2,6,3,7",
         )
 
+    def test_hybrid_host_exposes_one_thread_per_physical_core(self) -> None:
+        """Drop hyperthreads on a heterogeneous host, pinning one CPU per core."""
+        layout = {0: (0, 0), 4: (0, 0), 1: (0, 1), 5: (0, 1), 2: (0, 2), 3: (0, 3)}
+
+        self.assertEqual(
+            self.topology_for(layout),
+            b"sockets=1,cores=4,threads=1\npin=0,1,2,3",
+        )
+
     def test_returns_none_without_sysfs(self) -> None:
         """Report no topology when the online CPU file is absent."""
         with unittest.mock.patch.object(launcher, "SYS_CPU_DIR", self.make_temp_dir()):

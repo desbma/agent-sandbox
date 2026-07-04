@@ -577,11 +577,11 @@ if __name__ == "__main__":
             continue
         mounts.append(Mount(tool, None, MountKind.BIND_RO))
 
-    # tmpfs over Cargo target dir to avoid build files being invalidated
-    # by different sandbox env
+    # Cargo target dir
     target_dir = CWD / "target"
-    if (CWD / "Cargo.toml").is_file() and target_dir.is_dir():
-        mounts.append(Mount(target_dir, None, MountKind.TMPFS))
+    if (CWD / "Cargo.toml").is_file():
+        target_dir.mkdir(exist_ok=True)
+        mounts.append(Mount(target_dir, None, MountKind.OVERLAYFS))
 
     # xdg-open
     unjail_xdg = shutil.which("unjail-xdg-open")
@@ -615,7 +615,7 @@ if __name__ == "__main__":
                 continue
             bwrap_args += ["--ro-bind", str(mount.src), str(target)]
         elif mount.kind is MountKind.BIND_RW:
-            if not mount.src.exists():
+            if not mount.src.exists():  # NB: may exist as a file
                 # needed for agent dirs on first launch
                 mount.src.mkdir()
             bwrap_args += ["--bind", str(mount.src), str(target)]

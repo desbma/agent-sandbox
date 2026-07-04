@@ -310,8 +310,8 @@ class FilesystemTests(SandboxTestCase):
         self.assertFalse((cargo_home / "added.txt").exists())
         self.assertFalse((venv / "added.txt").exists())
 
-    def test_cargo_target_dir_is_tmpfs(self) -> None:
-        """Shadow an existing Cargo target directory with a writable tmpfs."""
+    def test_cargo_target_dir_is_shared_overlay(self) -> None:
+        """Expose the host Cargo target directory but keep writes out of it."""
         (self.fixture.project_dir / "Cargo.toml").write_text('[package]\nname = "x"\n')
         target = self.fixture.project_dir / "target"
         target.mkdir()
@@ -320,14 +320,30 @@ class FilesystemTests(SandboxTestCase):
         report = self.run_probe(
             [
                 Op("target_entries", OpKind.LISTDIR, target),
+                Op("artifact", OpKind.READ, target / "artifact.txt"),
                 Op("write", OpKind.WRITE, target / "built.txt"),
             ],
             agent="claude",
         )
 
-        self.assertEqual(report["target_entries"], [])
+        self.assertEqual(report["target_entries"], ["artifact.txt"])
+        self.assertEqual(report["artifact"], "host build")
         self.assertEqual(report["write"], "ok")
         self.assertEqual([p.name for p in target.iterdir()], ["artifact.txt"])
+
+    def test_cargo_target_dir_created_when_absent(self) -> None:
+        """Create the target directory and overlay it when the host lacks one."""
+        (self.fixture.project_dir / "Cargo.toml").write_text('[package]\nname = "x"\n')
+        target = self.fixture.project_dir / "target"
+
+        report = self.run_probe(
+            [Op("write", OpKind.WRITE, target / "built.txt")],
+            agent="claude",
+        )
+
+        self.assertEqual(report["write"], "ok")
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
 
     def test_dev_kvm_is_exposed(self) -> None:
         """Expose /dev/kvm as a character device."""

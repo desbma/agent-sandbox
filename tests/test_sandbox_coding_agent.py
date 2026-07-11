@@ -98,6 +98,32 @@ class TempDirTestCase(unittest.TestCase):
         )
         return repo
 
+    def make_jj_repo(self, root: Path) -> Path:
+        """Initialize a jj repository at root, creating parents, and return it."""
+        assert launcher.JJ_BIN is not None
+        root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [launcher.JJ_BIN, "git", "init", str(root)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return root
+
+    def add_jj_workspace(self, repo: Path, dest: Path) -> Path:
+        """Add a jj workspace of repo at dest and return it."""
+        assert launcher.JJ_BIN is not None
+        subprocess.run(
+            [launcher.JJ_BIN, "workspace", "add", str(dest)],
+            cwd=str(repo),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return dest
+
 
 class MountTests(unittest.TestCase):
     """Test the Mount dataclass."""
@@ -462,46 +488,242 @@ class FatalErrorTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "sandbox-coding-agent: boom\n")
 
 
-class GetRepoRootTests(TempDirTestCase):
-    """Test repository root discovery."""
+class ResolveJjTests(TempDirTestCase):
+    """Test resolving the real jj binary past the sandbox wrapper."""
 
-    def test_returns_git_root_from_subdir(self) -> None:
-        """Find the git repository root from a nested directory."""
+    def make_jj_stub(self, directory: Path) -> Path:
+        """Create an executable jj stub in directory and return the directory."""
+        directory.mkdir(parents=True, exist_ok=True)
+        stub = directory / "jj"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+        return directory
+
+    def test_skips_wrapper_dir(self) -> None:
+        """Skip the wrapper's jj and return the next one on PATH."""
+        base = self.make_temp_dir()
+        wrapper_dir = self.make_jj_stub(base / "run/bin")
+        real_dir = self.make_jj_stub(base / "usr/bin")
+        with (
+            unittest.mock.patch.object(launcher, "SANDBOX_BIN_DIR", wrapper_dir),
+            unittest.mock.patch.dict(
+                os.environ,
+                {"PATH": os.pathsep.join([str(wrapper_dir), str(real_dir)])},
+            ),
+        ):
+            self.assertEqual(launcher.resolve_jj(), str(real_dir / "jj"))
+
+    def test_returns_none_without_jj(self) -> None:
+        """Return None when no jj is on PATH."""
+        with unittest.mock.patch.dict(os.environ, {"PATH": str(self.make_temp_dir())}):
+            self.assertIsNone(launcher.resolve_jj())
+
+
+class GitToplevelTests(TempDirTestCase):
+    """Test git repository toplevel discovery."""
+
+    def test_returns_toplevel_from_subdir(self) -> None:
+        """Find the git toplevel from a nested directory."""
         repo = self.make_git_repo()
         subdir = repo / "nested"
         subdir.mkdir()
 
         with contextlib.chdir(subdir):
-            self.assertEqual(launcher.get_repo_root(), repo)
+            self.assertEqual(launcher.git_toplevel(), repo)
 
     def test_returns_none_outside_repo(self) -> None:
-        """Find no root outside any repository."""
+        """Find no toplevel outside any git repository."""
         with contextlib.chdir(self.make_temp_dir()):
-            self.assertIsNone(launcher.get_repo_root())
+            self.assertIsNone(launcher.git_toplevel())
 
 
-class GetJjDefaultWsRootTests(TempDirTestCase):
-    """Test jujutsu default workspace root discovery."""
+class JjWorkspacesTests(TempDirTestCase):
+    """Test enumeration of a jj repository's workspaces."""
 
-    def test_returns_none_outside_workspace(self) -> None:
-        """Find no workspace root outside any jj repository."""
+    def test_returns_none_outside_repo(self) -> None:
+        """Find no workspaces outside any jj repository."""
         with contextlib.chdir(self.make_temp_dir()):
-            self.assertIsNone(launcher.get_jj_default_ws_root())
+            self.assertIsNone(launcher.jj_workspaces())
 
-    @unittest.skipUnless(Path("/usr/bin/jj").exists(), "jj is not installed")
-    def test_returns_default_workspace_root(self) -> None:
-        """Find the default workspace root inside a jj repository."""
-        repo = self.make_temp_dir()
-        # the absolute path bypasses the sandbox's read-only jj wrapper, which rejects init
-        subprocess.run(
-            ["/usr/bin/jj", "git", "init", str(repo)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
+    @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
+    def test_returns_default_workspace(self) -> None:
+        """Return the sole default workspace of a single-workspace repository."""
+        repo = self.make_jj_repo(self.make_temp_dir() / "repo")
         with contextlib.chdir(repo):
-            self.assertEqual(launcher.get_jj_default_ws_root(), repo)
+            self.assertEqual(launcher.jj_workspaces(), {"default": repo})
+
+    @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
+    def test_returns_all_named_workspaces(self) -> None:
+        """Return every workspace name and root from any workspace of the repository."""
+        base = self.make_temp_dir()
+        repo = self.make_jj_repo(base / "main")
+        ws1 = self.add_jj_workspace(repo, base / "ws1")
+
+        for cwd in (repo, ws1):
+            with contextlib.chdir(cwd):
+                self.assertEqual(
+                    launcher.jj_workspaces(),
+                    {"default": repo, "ws1": ws1},
+                )
+
+
+class QueryRepoInfoTests(TempDirTestCase):
+    """Test single-query VCS layout resolution."""
+
+    def test_returns_none_outside_repo(self) -> None:
+        """Resolve no layout outside any repository."""
+        cwd = self.make_temp_dir()
+        with contextlib.chdir(cwd):
+            self.assertIsNone(launcher.query_repo_info(cwd))
+
+    def test_git_repo_sets_root_only(self) -> None:
+        """Resolve a git repository to its toplevel with no jj fields."""
+        repo = self.make_git_repo()
+        subdir = repo / "nested"
+        subdir.mkdir()
+
+        with contextlib.chdir(subdir):
+            info = launcher.query_repo_info(subdir)
+
+        self.assertEqual(info, launcher.RepoInfo(repo, None, None))
+
+    @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
+    def test_jj_single_workspace(self) -> None:
+        """Resolve a single-workspace jj repo to itself as root, default and sole workspace."""
+        repo = self.make_jj_repo(self.make_temp_dir() / "repo")
+        with contextlib.chdir(repo):
+            info = launcher.query_repo_info(repo)
+
+        self.assertEqual(info, launcher.RepoInfo(repo, repo, (repo,)))
+
+    @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
+    def test_jj_multi_workspace_keys_current_and_default(self) -> None:
+        """Key root on the current workspace while listing all roots and the default."""
+        base = self.make_temp_dir()
+        repo = self.make_jj_repo(base / "main")
+        ws1 = self.add_jj_workspace(repo, base / "ws1")
+
+        with contextlib.chdir(ws1):
+            info = launcher.query_repo_info(ws1)
+
+        assert info is not None
+        self.assertEqual(info.root, ws1)
+        self.assertEqual(info.jj_default_ws_root, repo)
+        self.assertEqual(set(info.jj_workspace_roots or []), {repo, ws1})
+
+
+class SharedWorkspaceRootTests(TempDirTestCase):
+    """Test the exchange root shared across a repository's workspaces."""
+
+    def build(self, rel_roots: list[str]) -> tuple[Path, list[Path]]:
+        """Create the given workspace directories under a fresh base."""
+        base = self.make_temp_dir()
+        roots = [base / rel for rel in rel_roots]
+        for root in roots:
+            root.mkdir(parents=True, exist_ok=True)
+        return base, roots
+
+    def test_single_workspace_returns_itself(self) -> None:
+        """Key on the sole workspace root when there is only one."""
+        base, roots = self.build(["proj"])
+
+        self.assertEqual(launcher.shared_workspace_root(roots[0], roots), base / "proj")
+
+    def test_nested_generic_default_collapses_to_project(self) -> None:
+        """Drop a generic default workspace name, keying on the grouping dir."""
+        base, roots = self.build(["proj/master", "proj/ws1", "proj/ws2"])
+
+        self.assertEqual(
+            launcher.shared_workspace_root(base / "proj/ws1", roots), base / "proj"
+        )
+
+    def test_nested_shared_letter_prefix_backs_up_to_project(self) -> None:
+        """Back up to the grouping dir when the common prefix cuts mid-component."""
+        base, roots = self.build(["proj/master", "proj/main"])
+
+        self.assertEqual(
+            launcher.shared_workspace_root(base / "proj/main", roots), base / "proj"
+        )
+
+    def test_flat_bare_default_keeps_project(self) -> None:
+        """Keep the bare project dir when flat siblings share it as a prefix."""
+        base, roots = self.build(["proj", "proj-ws1", "proj-ws2"])
+
+        self.assertEqual(
+            launcher.shared_workspace_root(base / "proj-ws1", roots), base / "proj"
+        )
+
+    def test_flat_and_nested_share_across_workspaces(self) -> None:
+        """Resolve every workspace of a repo to the same root."""
+        base, roots = self.build(["proj", "proj-ws1", "proj-ws2"])
+
+        resolved = {launcher.shared_workspace_root(root, roots) for root in roots}
+
+        self.assertEqual(resolved, {base / "proj"})
+
+    def test_flat_non_bare_default_collapses_to_parent(self) -> None:
+        """Collapse to the container when no bare project dir anchors the prefix."""
+        base, roots = self.build(["proj-main", "proj-ws1", "proj-ws2"])
+
+        self.assertEqual(launcher.shared_workspace_root(base / "proj-ws1", roots), base)
+
+    def test_cwd_in_workspace_subdir(self) -> None:
+        """Resolve the shared root from a directory below a workspace root."""
+        base, roots = self.build(["proj/master", "proj/ws1"])
+        subdir = base / "proj/ws1/nested"
+        subdir.mkdir()
+
+        self.assertEqual(launcher.shared_workspace_root(subdir, roots), base / "proj")
+
+    def test_scattered_workspaces_fall_back_to_cwd(self) -> None:
+        """Give up sharing when the common prefix climbs far above the workspaces."""
+        base, roots = self.build(["group/proj/master", "elsewhere/exp"])
+        cwd = base / "group/proj/master"
+
+        self.assertEqual(launcher.shared_workspace_root(cwd, roots), cwd)
+
+    def test_guardrail_shares_one_level_above(self) -> None:
+        """Share when the common prefix is exactly one level above the workspace."""
+        base, roots = self.build(["a/b/ws1", "a/b/ws2"])
+
+        self.assertEqual(
+            launcher.shared_workspace_root(base / "a/b/ws1", roots), base / "a/b"
+        )
+
+    def test_guardrail_drops_two_levels_above(self) -> None:
+        """Give up sharing when the common prefix is two levels above the workspace."""
+        base, roots = self.build(["a/b/ws", "a/c/ws"])
+        cwd = base / "a/b/ws"
+
+        self.assertEqual(launcher.shared_workspace_root(cwd, roots), cwd)
+
+
+class ExchangeDirPathTests(unittest.TestCase):
+    """Test construction of the runtime exchange dir path."""
+
+    def test_builds_name_from_last_two_parts(self) -> None:
+        """Name the dir after the agent and the identity's last two components."""
+        path = launcher.exchange_dir_path(
+            "claude", Path("/run/user/1000"), Path("/home/x/Projets/proj")
+        )
+
+        self.assertEqual(path, Path("/run/user/1000/claude-projets-proj"))
+
+    def test_lowercases_components(self) -> None:
+        """Lowercase the identity components in the dir name."""
+        path = launcher.exchange_dir_path(
+            "codex", Path("/run/user/1000"), Path("/home/x/Projets/AgentSandbox")
+        )
+
+        self.assertEqual(path, Path("/run/user/1000/codex-projets-agentsandbox"))
+
+    def test_none_under_tmp(self) -> None:
+        """Build no exchange dir for an identity under /tmp."""
+        path = launcher.exchange_dir_path(
+            "claude", Path("/run/user/1000"), Path("/tmp/scratch/work")
+        )
+
+        self.assertIsNone(path)
 
 
 class ClaudePathHashTests(unittest.TestCase):
@@ -552,7 +774,7 @@ class ConfirmCwdTests(TempDirTestCase):
         cwd = self.make_temp_dir()
 
         with contextlib.chdir(cwd):
-            self.assertEqual(launcher.confirm_cwd(), cwd)
+            self.assertEqual(launcher.confirm_cwd(None), cwd)
 
     def test_refuses_home(self) -> None:
         """Exit when started directly in the home directory."""
@@ -563,13 +785,13 @@ class ConfirmCwdTests(TempDirTestCase):
             contextlib.redirect_stderr(io.StringIO()),
             self.assertRaises(SystemExit) as ctx,
         ):
-            launcher.confirm_cwd()
+            launcher.confirm_cwd(None)
 
         self.assertEqual(ctx.exception.code, 1)
 
     def test_prompt_accepted_moves_to_repo_root(self) -> None:
         """Move to the repository root when the user accepts the prompt."""
-        repo = self.make_git_repo()
+        repo = self.make_temp_dir()
         subdir = repo / "nested"
         subdir.mkdir()
 
@@ -579,11 +801,13 @@ class ConfirmCwdTests(TempDirTestCase):
             unittest.mock.patch("builtins.input", side_effect=["y"]),
         ):
             stdin.isatty.return_value = True
-            self.assertEqual(launcher.confirm_cwd(), repo)
+            self.assertEqual(
+                launcher.confirm_cwd(launcher.RepoInfo(repo, None, None)), repo
+            )
 
     def test_prompt_declined_stays_in_cwd(self) -> None:
         """Stay in the current directory when the prompt is declined."""
-        repo = self.make_git_repo()
+        repo = self.make_temp_dir()
         subdir = repo / "nested"
         subdir.mkdir()
 
@@ -592,7 +816,9 @@ class ConfirmCwdTests(TempDirTestCase):
             unittest.mock.patch("sys.stdin") as stdin,
         ):
             stdin.isatty.return_value = False
-            self.assertEqual(launcher.confirm_cwd(), subdir)
+            self.assertEqual(
+                launcher.confirm_cwd(launcher.RepoInfo(repo, None, None)), subdir
+            )
 
 
 if __name__ == "__main__":

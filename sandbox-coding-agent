@@ -12,7 +12,7 @@
 # printf 'info kvm\nquit\n' | qemu-system-x86_64 -accel kvm -machine none -nodefaults -display none -serial none -monitor stdio -S
 #
 
-import collections
+import collections.abc
 import contextlib
 import dataclasses
 import enum
@@ -59,29 +59,60 @@ class File:
     executable: bool = False
 
 
-def get_repo_root() -> Path | None:
-    """Get root of the jj or git repo containing the cwd, first match wins."""
-    for cmd in [["jj", "root"], ["git", "rev-parse", "--show-toplevel"]]:
-        try:
-            out = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                check=True,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            continue
-        return Path(out.stdout.strip())
-    return None
+@dataclasses.dataclass(frozen=True, slots=True)
+class RepoInfo:
+    """VCS layout of the launch directory, resolved with a single jj or git query."""
+
+    root: Path
+    jj_default_ws_root: Path | None
+    jj_workspace_roots: tuple[Path, ...] | None
 
 
-def get_jj_default_ws_root() -> Path | None:
-    """Get root of jj default workspace."""
+def resolve_jj() -> str | None:
+    """Resolve the jj binary on PATH, skipping the sandbox wrapper that injects --ignore-working-copy."""
+    entries = (
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        # the wrapper already adds --ignore-working-copy; a second one is a hard jj error
+        if Path(entry) != SANDBOX_BIN_DIR
+    )
+    return shutil.which("jj", path=os.pathsep.join(entries))
+
+
+def jj_workspaces() -> dict[str, Path] | None:
+    """Map each workspace name of the jj repo at the cwd to its root, or None outside jj."""
+    if JJ_BIN is None:
+        return None
     try:
         out = subprocess.run(
-            ["jj", "workspace", "root", "--name", "default"],
+            [
+                JJ_BIN,
+                "--ignore-working-copy",
+                "workspace",
+                "list",
+                "-T",
+                'name ++ "\t" ++ root ++ "\n"',
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    workspaces: dict[str, Path] = {}
+    for line in out.stdout.splitlines():
+        name, root = line.split("\t", 1)
+        workspaces[name] = Path(root)
+    return workspaces
+
+
+def git_toplevel() -> Path | None:
+    """Return the git toplevel containing the cwd, or None outside a git repo."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -91,6 +122,48 @@ def get_jj_default_ws_root() -> Path | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return Path(out.stdout.strip())
+
+
+def query_repo_info(cwd: Path) -> RepoInfo | None:
+    """Resolve the VCS layout of cwd from a single jj or git query, or None outside any repo."""
+    workspaces = jj_workspaces()
+    if workspaces is not None:
+        roots = tuple(workspaces.values())
+        default = workspaces.get("default")
+        current = max(
+            (root for root in roots if cwd.is_relative_to(root)),
+            key=lambda root: len(root.parts),
+            default=cwd,
+        )
+        return RepoInfo(current, default, roots)
+    git_root = git_toplevel()
+    if git_root is not None:
+        return RepoInfo(git_root, None, None)
+    return None
+
+
+def shared_workspace_root(cwd: Path, ws_roots: collections.abc.Sequence[Path]) -> Path:
+    """Return the directory shared by a repo's workspace roots, or cwd if too scattered."""
+    shared = Path(os.path.commonprefix([str(root) for root in ws_roots]).rstrip("/"))
+    # a common prefix cutting mid-component is not a real directory; back up to its parent
+    if not shared.is_dir():
+        shared = shared.parent
+    current = max(
+        (root for root in ws_roots if cwd.is_relative_to(root)),
+        key=lambda root: len(root.parts),
+        default=cwd,
+    )
+    # a prefix more than one level above the workspace means unrelated checkouts: do not share
+    if len(current.parts) - len(shared.parts) >= EXCHANGE_MAX_PREFIX_DEPTH_DELTA:
+        return cwd
+    return shared
+
+
+def exchange_dir_path(agent: str, runtime_dir: Path, identity: Path) -> Path | None:
+    """Build the runtime exchange dir path for an identity, or None when it is under /tmp."""
+    if identity.is_relative_to("/tmp"):
+        return None
+    return runtime_dir / "-".join(p.lower() for p in (agent, *identity.parts[-2:]))
 
 
 def claude_path_hash(path: str) -> str:
@@ -143,16 +216,17 @@ def prompt_bool(msg: str, *, default: bool = False) -> bool:
             return result[answer]
 
 
-def confirm_cwd() -> Path:
+def confirm_cwd(repo_info: RepoInfo | None) -> Path:
     """Confirm startup directory if needed."""
     cwd = Path.cwd()
-    repo_root = get_repo_root()
     if (
-        (repo_root is not None)
-        and (repo_root != cwd)
-        and prompt_bool(f"Run in repo root {str(repo_root)!r} instead of {str(cwd)!r}?")
+        (repo_info is not None)
+        and (repo_info.root != cwd)
+        and prompt_bool(
+            f"Run in repo root {str(repo_info.root)!r} instead of {str(cwd)!r}?"
+        )
     ):
-        cwd = repo_root
+        cwd = repo_info.root
     elif cwd == Path.home():
         fatal_error(f"Refusing to start in {str(HOME)!r}")
     return cwd
@@ -300,9 +374,14 @@ def proxy_setup() -> tuple[Mount, dict[str, str]] | None:
 AGENT = Path(sys.argv[1]).name
 DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
 
+# sandbox path holding generated shims, and the real jj that bypasses the jj shim placed there
+SANDBOX_BIN_DIR = Path("/run/bin")
+JJ_BIN = resolve_jj()
+
 # host dirs
 HOME = Path.home()
-CWD = confirm_cwd()
+REPO_INFO = query_repo_info(Path.cwd())
+CWD = confirm_cwd(REPO_INFO)
 XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache"))
 XDG_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
@@ -317,6 +396,9 @@ GH_PLACEHOLDER_TOKEN = "agent-proxy-placeholder"
 # Claude Code per-project slug encoding (mirrors its internal LE())
 BASE36_DIGITS = string.digits + string.ascii_lowercase
 CLAUDE_SLUG_MAX_LEN = 200
+
+# maximum levels the shared exchange dir may sit above a workspace root before sharing is dropped
+EXCHANGE_MAX_PREFIX_DEPTH_DELTA = 2
 
 # host CPU topology, read from sysfs and handed to the guest microvm launcher
 SYS_CPU_DIR = Path("/sys/devices/system/cpu")
@@ -484,7 +566,6 @@ AGENT_SYMLINKS = {
 }
 
 # env
-SANDBOX_BIN_DIR = Path("/run/bin")
 ENV_SET = {
     "PATH": ":".join(
         (
@@ -532,7 +613,7 @@ if __name__ == "__main__":
     mounts = list(MOUNTS) + AGENT_MOUNTS.get(AGENT, [])
 
     # jujutsu default workspace
-    jj_default_ws_root = get_jj_default_ws_root()
+    jj_default_ws_root = REPO_INFO.jj_default_ws_root if REPO_INFO is not None else None
     if (jj_default_ws_root is not None) and not CWD.is_relative_to(jj_default_ws_root):
         for subdir in [".jj", ".git"]:
             mounts.append(Mount(jj_default_ws_root / subdir, None, MountKind.BIND_RO))
@@ -555,15 +636,17 @@ if __name__ == "__main__":
     if not agent_bin.is_relative_to("/usr"):
         mounts.append(Mount(agent_bin, None, MountKind.BIND_RO))
 
-    # exchange dir in /run
-    if not CWD.is_relative_to("/tmp"):
-        exchange_dir = XDG_RUNTIME_DIR / "-".join(
-            p.lower() for p in (AGENT, *CWD.parts[-2:])
-        )
+    # exchange dir in /run, shared across a jj repo's workspaces
+    if REPO_INFO is None:
+        exchange_root = CWD
+    elif REPO_INFO.jj_workspace_roots is not None:
+        exchange_root = shared_workspace_root(CWD, REPO_INFO.jj_workspace_roots)
+    else:
+        exchange_root = REPO_INFO.root
+    exchange_dir = exchange_dir_path(AGENT, XDG_RUNTIME_DIR, exchange_root)
+    if exchange_dir is not None:
         exchange_dir.mkdir(parents=True, exist_ok=True)
         mounts.append(Mount(exchange_dir, None, MountKind.BIND_RW))
-    else:
-        exchange_dir = None
 
     # tools to expose, even if not under /usr
     for tool_name in HOME_TOOLS:

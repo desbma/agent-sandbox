@@ -1,6 +1,14 @@
 # Agent Sandbox
 
-This is my opinionated solution for the coding agent sandboxing problem.
+Opinionated solution for sandboxing coding agents on Linux.
+
+---
+
+**This repository contains personal tools that I publish for sharing, documentation and convenience.**
+
+**They may or may not work for your use case, and little effort has been made to support systems and workflows other than the ones I use.**
+
+---
 
 ## Rationale & philosophy
 
@@ -18,7 +26,7 @@ This is made from 3 parts:
 - [`agent-proxy`](#agent-proxy): an optional host-side [mitmproxy](https://mitmproxy.org/) user service that lets [`gh`](https://github.com/cli/cli) reach the GitHub API from inside the sandbox without exposing the token to the agent.
 - [`agent-microvm`](#agent-microvm): a [skill](https://agentskills.io/) the agent can use to spawn a throwaway microVM and run privileged commands in it, completely isolated from the host.
 
-The sandbox and microVM scripts were preceded by experiments with different container ([Firejail](https://github.com/netblue30/firejail), [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)) and VMM ([CrosVM](https://github.com/google/crosvm), [cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Firecracker](https://firecracker-microvm.github.io/), [systemd-vmspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-vmspawn.html)) solutions, and were then refined during months of daily use. They are heavily tailored for my workflow, and probably won't work as-is for yours.
+The sandbox and microVM scripts were preceded by experiments with different container ([Firejail](https://github.com/netblue30/firejail), [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)) and VMM ([CrosVM](https://github.com/google/crosvm), [cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Firecracker](https://firecracker-microvm.github.io/), [systemd-vmspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-vmspawn.html)) solutions, and were then refined during months of daily use.
 
 ## `sandbox-coding-agent`
 

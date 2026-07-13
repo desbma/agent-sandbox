@@ -80,10 +80,10 @@ class SandboxFixture:
             "TERM": TEST_TERM,
         }
 
-    def exchange_dir(self, agent: str) -> Path:
-        """Return the exchange directory path the launcher derives for agent."""
-        name = "-".join(p.lower() for p in (agent, self.root.name, "project"))
-        return self.runtime_dir / name
+    def exchange_dir(self) -> Path:
+        """Return the exchange directory path the launcher derives for the project."""
+        name = "-".join(p.lower() for p in (self.root.name, "project"))
+        return self.runtime_dir / "agent" / name
 
     def sandbox_path(self) -> str:
         """Return the PATH value the launcher sets inside the sandbox."""
@@ -571,10 +571,8 @@ class InstructionsTests(SandboxTestCase):
         self.assertIn("`/usr`", ro_line)
         rw_line = next(line for line in lines if "normal bind mounts" in line)
         self.assertIn(f"`{self.fixture.project_dir}`", rw_line)
-        self.assertIn(f"`{self.fixture.exchange_dir('claude')}`", rw_line)
-        self.assertIn(
-            f"place them under `{self.fixture.exchange_dir('claude')}`", content
-        )
+        self.assertIn(f"`{self.fixture.exchange_dir()}`", rw_line)
+        self.assertIn(f"place them under `{self.fixture.exchange_dir()}`", content)
         self.assertNotIn("overlayfs filesystems", content)
         self.assertNotIn("xdg-open", content)
         self.assertNotIn("`gh`", content)
@@ -611,7 +609,7 @@ class InstructionsTests(SandboxTestCase):
 
     def test_exchange_dir_round_trips(self) -> None:
         """Create the exchange directory and reflect sandbox writes on the host."""
-        exchange = self.fixture.exchange_dir("claude")
+        exchange = self.fixture.exchange_dir()
 
         report = self.run_probe(
             [

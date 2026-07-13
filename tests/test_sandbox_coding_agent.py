@@ -702,25 +702,25 @@ class ExchangeDirPathTests(unittest.TestCase):
     """Test construction of the runtime exchange dir path."""
 
     def test_builds_name_from_last_two_parts(self) -> None:
-        """Name the dir after the agent and the identity's last two components."""
+        """Name the dir after the identity's last two components."""
         path = launcher.exchange_dir_path(
-            "claude", Path("/run/user/1000"), Path("/home/x/Projets/proj")
+            Path("/run/user/1000"), Path("/home/x/Projets/proj")
         )
 
-        self.assertEqual(path, Path("/run/user/1000/claude-projets-proj"))
+        self.assertEqual(path, Path("/run/user/1000/agent/projets-proj"))
 
     def test_lowercases_components(self) -> None:
         """Lowercase the identity components in the dir name."""
         path = launcher.exchange_dir_path(
-            "codex", Path("/run/user/1000"), Path("/home/x/Projets/AgentSandbox")
+            Path("/run/user/1000"), Path("/home/x/Projets/AgentSandbox")
         )
 
-        self.assertEqual(path, Path("/run/user/1000/codex-projets-agentsandbox"))
+        self.assertEqual(path, Path("/run/user/1000/agent/projets-agentsandbox"))
 
     def test_none_under_tmp(self) -> None:
         """Build no exchange dir for an identity under /tmp."""
         path = launcher.exchange_dir_path(
-            "claude", Path("/run/user/1000"), Path("/tmp/scratch/work")
+            Path("/run/user/1000"), Path("/tmp/scratch/work")
         )
 
         self.assertIsNone(path)

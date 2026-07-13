@@ -159,11 +159,12 @@ def shared_workspace_root(cwd: Path, ws_roots: collections.abc.Sequence[Path]) -
     return shared
 
 
-def exchange_dir_path(agent: str, runtime_dir: Path, identity: Path) -> Path | None:
+def exchange_dir_path(runtime_dir: Path, identity: Path) -> Path | None:
     """Build the runtime exchange dir path for an identity, or None when it is under /tmp."""
     if identity.is_relative_to("/tmp"):
         return None
-    return runtime_dir / "-".join(p.lower() for p in (agent, *identity.parts[-2:]))
+    slug = "-".join(p.lower() for p in identity.parts[-2:])
+    return runtime_dir / "agent" / slug
 
 
 def claude_path_hash(path: str) -> str:
@@ -643,7 +644,7 @@ if __name__ == "__main__":
         exchange_root = shared_workspace_root(CWD, REPO_INFO.jj_workspace_roots)
     else:
         exchange_root = REPO_INFO.root
-    exchange_dir = exchange_dir_path(AGENT, XDG_RUNTIME_DIR, exchange_root)
+    exchange_dir = exchange_dir_path(XDG_RUNTIME_DIR, exchange_root)
     if exchange_dir is not None:
         exchange_dir.mkdir(parents=True, exist_ok=True)
         mounts.append(Mount(exchange_dir, None, MountKind.BIND_RW))

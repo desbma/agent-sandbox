@@ -1,6 +1,7 @@
 """Test sandbox-coding-agent helpers without starting bubblewrap."""
 
 import atexit
+import collections.abc
 import contextlib
 import grp
 import importlib.machinery
@@ -136,15 +137,59 @@ class MountTests(unittest.TestCase):
 
     def test_target_defaults_to_source(self) -> None:
         """Use the source path as target when no remap is given."""
-        mount = launcher.Mount(Path("/src"), None, launcher.MountKind.BIND_RO)
+        mount = launcher.Mount(Path("/src"), launcher.MountKind.BIND_RO)
 
         self.assertEqual(mount.target, Path("/src"))
 
     def test_target_uses_remap(self) -> None:
         """Use the remapped destination as target when given."""
-        mount = launcher.Mount(Path("/src"), Path("/dst"), launcher.MountKind.BIND_RO)
+        mount = launcher.Mount(Path("/src"), launcher.MountKind.BIND_RO, Path("/dst"))
 
         self.assertEqual(mount.target, Path("/dst"))
+
+    def test_bwrap_args_bind_ro(self) -> None:
+        """Bind the source read-only at the remapped target."""
+        mount = launcher.Mount(Path("/src"), launcher.MountKind.BIND_RO, Path("/dst"))
+
+        self.assertEqual(mount.bwrap_args, ["--ro-bind", "/src", "/dst"])
+
+    def test_bwrap_args_bind_rw(self) -> None:
+        """Bind the source read-write at its own path when not remapped."""
+        mount = launcher.Mount(Path("/src"), launcher.MountKind.BIND_RW)
+
+        self.assertEqual(mount.bwrap_args, ["--bind", "/src", "/src"])
+
+    def test_bwrap_args_tmpfs(self) -> None:
+        """Mount a private tmpfs over the target."""
+        mount = launcher.Mount(Path("/src"), launcher.MountKind.TMPFS)
+
+        self.assertEqual(mount.bwrap_args, ["--perms", "0700", "--tmpfs", "/src"])
+
+    def test_bwrap_args_overlayfs(self) -> None:
+        """Overlay a throwaway upper layer over the source at the target."""
+        mount = launcher.Mount(Path("/src"), launcher.MountKind.OVERLAYFS, Path("/dst"))
+
+        self.assertEqual(
+            mount.bwrap_args,
+            ["--dir", "/dst", "--overlay-src", "/src", "--tmp-overlay", "/dst"],
+        )
+
+
+class MountKindTests(unittest.TestCase):
+    """Test the mount kind specifications."""
+
+    def test_only_bind_rw_creates_a_missing_source(self) -> None:
+        """Create a missing source directory only for read-write binds."""
+        creating = {kind for kind in launcher.MountKind if kind.spec.create_missing}
+
+        self.assertEqual(creating, {launcher.MountKind.BIND_RW})
+
+    def test_descriptions_are_ordered_for_display(self) -> None:
+        """Describe the kinds from the most to the least isolated from the host."""
+        self.assertEqual(
+            [kind.spec.agent_description.split(" ")[0] for kind in launcher.MountKind],
+            ["tmpfs", "overlayfs", "read-only", "normal"],
+        )
 
 
 class HomeToolsTests(unittest.TestCase):
@@ -192,7 +237,7 @@ class GenPasswdTests(unittest.TestCase):
             ]
         )
 
-        lines = launcher.gen_passwd().decode().splitlines()
+        lines = launcher.gen_passwd([]).decode().splitlines()
 
         self.assertEqual(lines[0], expected)
 
@@ -203,7 +248,7 @@ class GenPasswdTests(unittest.TestCase):
             with contextlib.suppress(KeyError):
                 expected_names.append(pwd.getpwnam(name).pw_name)
 
-        lines = launcher.gen_passwd().decode().splitlines()
+        lines = launcher.gen_passwd(launcher.GROUPS).decode().splitlines()
 
         self.assertEqual([line.split(":")[0] for line in lines], expected_names)
 
@@ -223,7 +268,7 @@ class GenGroupTests(unittest.TestCase):
             ]
         )
 
-        lines = launcher.gen_group().decode().splitlines()
+        lines = launcher.gen_group([]).decode().splitlines()
 
         self.assertEqual(lines[0], expected)
 
@@ -234,7 +279,7 @@ class GenGroupTests(unittest.TestCase):
             with contextlib.suppress(KeyError):
                 expected_names.append(grp.getgrnam(name).gr_name)
 
-        lines = launcher.gen_group().decode().splitlines()
+        lines = launcher.gen_group(launcher.GROUPS).decode().splitlines()
 
         self.assertEqual([line.split(":")[0] for line in lines], expected_names)
 
@@ -322,93 +367,136 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
         self.assertNotIn("`gh`", without_bullet)
 
 
-class ResolveAgentBinaryTests(TempDirTestCase):
-    """Test resolution of an agent binary from candidate paths."""
-
-    def test_returns_first_executable_candidate(self) -> None:
-        """Return the first executable candidate, skipping a missing one."""
-        base = self.make_temp_dir()
-        present = self.make_executable(base / "present")
-
-        self.assertEqual(
-            launcher.resolve_agent_binary([base / "missing", present]), present
-        )
-
-    def test_prefers_earlier_candidate(self) -> None:
-        """Return the earliest candidate when several are executable."""
-        base = self.make_temp_dir()
-        first = self.make_executable(base / "first")
-        second = self.make_executable(base / "second")
-
-        self.assertEqual(launcher.resolve_agent_binary([first, second]), first)
-
-    def test_skips_non_executable_candidate(self) -> None:
-        """Skip a candidate that exists but is not executable."""
-        base = self.make_temp_dir()
-        plain = base / "plain"
-        plain.write_text("")
-        executable = self.make_executable(base / "runnable")
-
-        self.assertEqual(launcher.resolve_agent_binary([plain, executable]), executable)
-
-    def test_returns_none_when_no_candidate_exists(self) -> None:
-        """Return None when none of the candidates exist."""
-        base = self.make_temp_dir()
-
-        self.assertIsNone(launcher.resolve_agent_binary([base / "a", base / "b"]))
-
-
 class ResolveExtraAgentsTests(TempDirTestCase):
     """Test which always-provisioned agents are added beside the launched one."""
+
+    @contextlib.contextmanager
+    def agents(
+        self, provision_always: tuple[Path, ...]
+    ) -> collections.abc.Iterator[None]:
+        """Replace the agent table with a claude and a pi provisioned from the given paths."""
+        table = {
+            "claude": launcher.AgentSpec(agents_md=Path("/claude/CLAUDE.md")),
+            "pi": launcher.AgentSpec(
+                agents_md=Path("/pi/AGENTS.md"), provision_always=provision_always
+            ),
+        }
+        with unittest.mock.patch.object(launcher, "AGENTS", table):
+            yield
 
     def test_includes_installed_extra(self) -> None:
         """Map an installed extra agent to its resolved binary."""
         pi_bin = self.make_executable(self.make_temp_dir() / "pi")
-        with unittest.mock.patch.object(
-            launcher, "ALWAYS_PROVISIONED_AGENTS", {"pi": [pi_bin]}
-        ):
+        with self.agents((pi_bin,)):
+            self.assertEqual(launcher.resolve_extra_agents("claude"), {"pi": pi_bin})
+
+    def test_prefers_earliest_installed_binary(self) -> None:
+        """Resolve an extra agent to the first of its executable binaries."""
+        base = self.make_temp_dir()
+        first = self.make_executable(base / "first")
+        second = self.make_executable(base / "second")
+        with self.agents((first, second)):
+            self.assertEqual(launcher.resolve_extra_agents("claude"), {"pi": first})
+
+    def test_skips_non_executable_binary(self) -> None:
+        """Skip a binary that exists but is not executable."""
+        base = self.make_temp_dir()
+        plain = base / "plain"
+        plain.write_text("")
+        pi_bin = self.make_executable(base / "pi")
+        with self.agents((plain, pi_bin)):
             self.assertEqual(launcher.resolve_extra_agents("claude"), {"pi": pi_bin})
 
     def test_excludes_uninstalled_extra(self) -> None:
         """Drop an extra agent whose binary is absent."""
         base = self.make_temp_dir()
-        with unittest.mock.patch.object(
-            launcher, "ALWAYS_PROVISIONED_AGENTS", {"pi": [base / "pi"]}
-        ):
+        with self.agents((base / "pi",)):
             self.assertEqual(launcher.resolve_extra_agents("claude"), {})
+
+    def test_excludes_agent_never_provisioned_beside_others(self) -> None:
+        """Drop an agent with no always-provisioned binary path."""
+        pi_bin = self.make_executable(self.make_temp_dir() / "pi")
+        with self.agents((pi_bin,)):
+            self.assertEqual(launcher.resolve_extra_agents("pi"), {})
 
     def test_excludes_entry_agent(self) -> None:
         """Skip the launched agent even when it is an always-provisioned one."""
         pi_bin = self.make_executable(self.make_temp_dir() / "pi")
+        with self.agents((pi_bin,)):
+            self.assertNotIn("pi", launcher.resolve_extra_agents("pi"))
+
+
+class AgentFilesTests(unittest.TestCase):
+    """Test the per-agent generated config files."""
+
+    def test_codex_config_trusts_the_launch_directory(self) -> None:
+        """Append a trust entry for the launch directory to the user's codex config."""
+        config = FAKE_CONFIG_HOME / "codex/config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('model = "test"\n')
+        self.addCleanup(shutil.rmtree, config.parent, ignore_errors=True)
+
+        content = launcher.codex_files()[FAKE_HOME / ".codex/config.toml"].data.decode()
+
+        self.assertEqual(
+            content,
+            f'model = "test"\n\n[projects."{IMPORT_CWD}"]\ntrust_level = "trusted"\n',
+        )
+
+    def test_pi_npmrc_points_at_its_state_dir(self) -> None:
+        """Prefix pi's npm modules with its own state directory."""
+        content = launcher.pi_files()[FAKE_HOME / ".npmrc"].data.decode()
+
+        self.assertEqual(content, f"prefix={FAKE_HOME / '.pi/agent/npm'}\n")
+
+
+class ClaudeMemoryEnvTests(unittest.TestCase):
+    """Test the Claude memory override keyed on the jj default workspace."""
+
+    def test_no_override_without_jj_default_workspace(self) -> None:
+        """Leave the memory path alone outside a jj repository."""
+        with unittest.mock.patch.object(launcher, "JJ_DEFAULT_WS_ROOT", None):
+            self.assertEqual(launcher.claude_memory_env(), {})
+
+    def test_override_keyed_on_default_workspace(self) -> None:
+        """Point the memory dir at the default workspace's project slug."""
         with unittest.mock.patch.object(
-            launcher, "ALWAYS_PROVISIONED_AGENTS", {"pi": [pi_bin]}
+            launcher, "JJ_DEFAULT_WS_ROOT", Path("/home/user/proj")
         ):
-            self.assertEqual(launcher.resolve_extra_agents("pi"), {})
+            self.assertEqual(
+                launcher.claude_memory_env(),
+                {
+                    "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": str(
+                        FAKE_HOME / ".claude/projects/-home-user-proj/memory"
+                    )
+                },
+            )
 
 
-class ProxySetupTests(unittest.TestCase):
+class ProxyTests(unittest.TestCase):
     """Test detection of the auth-injecting proxy."""
 
-    def test_returns_none_without_ca_bundle(self) -> None:
+    def test_inactive_without_ca_bundle(self) -> None:
         """Detect no proxy when the CA bundle file is absent."""
-        self.assertIsNone(launcher.proxy_setup())
+        self.assertFalse(launcher.PROXY_ACTIVE)
+        self.assertEqual(launcher.PROXY_MOUNTS, [])
+        self.assertEqual(launcher.PROXY_ENV, {})
 
-    def test_returns_mount_and_env_with_ca_bundle(self) -> None:
-        """Return the CA bundle mount and gh routing env when the proxy runs."""
+    def test_mount_and_env_with_ca_bundle(self) -> None:
+        """Expose the CA bundle and route gh through the proxy when it runs."""
         bundle = Path(launcher.PROXY_CA_BUNDLE)
         bundle.parent.mkdir(parents=True, exist_ok=True)
         bundle.write_text("FAKE CA")
         self.addCleanup(bundle.unlink)
 
-        proxy = launcher.proxy_setup()
+        module = load_launcher()
 
-        assert proxy is not None
-        mount, env = proxy
-        self.assertEqual(mount.src, bundle)
-        self.assertIsNone(mount.dst)
-        self.assertEqual(mount.kind, launcher.MountKind.BIND_RO)
         self.assertEqual(
-            env,
+            module.PROXY_MOUNTS,
+            [module.Mount(bundle, module.MountKind.BIND_RO)],
+        )
+        self.assertEqual(
+            module.PROXY_ENV,
             {
                 "GH_TOKEN": "agent-proxy-placeholder",
                 "HTTPS_PROXY": "http://127.0.0.1:8085",
@@ -416,6 +504,185 @@ class ProxySetupTests(unittest.TestCase):
                 "SSL_CERT_FILE": str(bundle),
             },
         )
+
+
+class ToolMountsTests(TempDirTestCase):
+    """Test the mounts exposing host tools."""
+
+    def mounts_for(self, tools: list[str], path: Path) -> list[object]:
+        """Resolve the tool mounts for the given tool names against a single PATH dir."""
+        with (
+            unittest.mock.patch.object(launcher, "HOME_TOOLS", tools),
+            unittest.mock.patch.dict(os.environ, {"PATH": str(path)}),
+        ):
+            return launcher.tool_mounts()
+
+    def test_exposes_tool_outside_usr(self) -> None:
+        """Bind a tool resolved outside /usr read-only at its own path."""
+        base = self.make_temp_dir()
+        tool = self.make_executable(base / "mytool")
+
+        self.assertEqual(
+            self.mounts_for(["mytool"], base),
+            [launcher.Mount(tool, launcher.MountKind.BIND_RO)],
+        )
+
+    def test_accepts_absolute_tool_path(self) -> None:
+        """Bind a tool given as an absolute path, as EDITOR may be."""
+        base = self.make_temp_dir()
+        tool = self.make_executable(base / "mytool")
+
+        self.assertEqual(
+            self.mounts_for([str(tool)], self.make_temp_dir()),
+            [launcher.Mount(tool, launcher.MountKind.BIND_RO)],
+        )
+
+    def test_skips_tool_under_usr(self) -> None:
+        """Skip a tool already exposed by the read-only /usr bind."""
+        self.assertEqual(self.mounts_for(["env"], Path("/usr/bin")), [])
+
+    def test_skips_missing_tool(self) -> None:
+        """Skip a tool that is not installed."""
+        self.assertEqual(self.mounts_for(["mytool"], self.make_temp_dir()), [])
+
+
+class CargoTargetMountsTests(TempDirTestCase):
+    """Test the cargo target directory overlay."""
+
+    def mounts_for(self, cwd: Path) -> list[object]:
+        """Resolve the cargo target mounts for a launch directory."""
+        with unittest.mock.patch.object(launcher, "CWD", cwd):
+            return launcher.cargo_target_mounts()
+
+    def test_overlays_target_dir_of_a_crate(self) -> None:
+        """Overlay the target dir, creating it, when the launch dir is a crate."""
+        cwd = self.make_temp_dir()
+        (cwd / "Cargo.toml").write_text("")
+
+        mounts = self.mounts_for(cwd)
+
+        self.assertEqual(
+            mounts, [launcher.Mount(cwd / "target", launcher.MountKind.OVERLAYFS)]
+        )
+        self.assertTrue((cwd / "target").is_dir())
+
+    def test_no_mount_outside_a_crate(self) -> None:
+        """Leave the launch dir alone when it holds no manifest."""
+        cwd = self.make_temp_dir()
+
+        self.assertEqual(self.mounts_for(cwd), [])
+        self.assertFalse((cwd / "target").exists())
+
+
+class AgentBinaryMountsTests(TempDirTestCase):
+    """Test the mounts exposing the provisioned agents' binaries."""
+
+    def test_binds_binaries_and_wrappers(self) -> None:
+        """Bind the launched agent's binary, the extras' binaries, and every wrapper."""
+        base = self.make_temp_dir()
+        claude_bin = self.make_executable(base / "claude")
+        pi_bin = self.make_executable(base / "pi")
+
+        with unittest.mock.patch.object(sys, "argv", ["launcher", str(claude_bin)]):
+            mounts = launcher.agent_binary_mounts(["claude", "pi"], {"pi": pi_bin})
+
+        self.assertEqual(
+            mounts,
+            [
+                launcher.Mount(
+                    FAKE_HOME / ".local/bin/claude", launcher.MountKind.BIND_RO
+                ),
+                launcher.Mount(FAKE_HOME / ".local/bin/pi", launcher.MountKind.BIND_RO),
+                launcher.Mount(claude_bin, launcher.MountKind.BIND_RO),
+                launcher.Mount(pi_bin, launcher.MountKind.BIND_RO),
+            ],
+        )
+
+    def test_skips_binary_under_usr(self) -> None:
+        """Skip an agent binary already exposed by the read-only /usr bind."""
+        with unittest.mock.patch.object(sys, "argv", ["launcher", "/usr/bin/env"]):
+            mounts = launcher.agent_binary_mounts(["env"], {})
+
+        self.assertEqual(
+            mounts,
+            [launcher.Mount(FAKE_HOME / ".local/bin/env", launcher.MountKind.BIND_RO)],
+        )
+
+
+class VcsDirsTests(TempDirTestCase):
+    """Test which VCS directories are exposed in the sandbox."""
+
+    def test_launch_dir_dirs_outside_a_known_repo(self) -> None:
+        """Expose the launch dir's own VCS dirs when no repository is detected."""
+        cwd = self.make_temp_dir()
+
+        self.assertEqual(launcher.vcs_dirs(cwd, None), [cwd / ".git", cwd / ".jj"])
+
+    def test_repo_root_dirs(self) -> None:
+        """Expose the VCS dirs of the launch dir when it is the repository root."""
+        cwd = self.make_temp_dir()
+        info = launcher.RepoInfo(cwd, None, None)
+
+        self.assertEqual(launcher.vcs_dirs(cwd, info), [cwd / ".git", cwd / ".jj"])
+
+    def test_no_dirs_below_the_repo_root(self) -> None:
+        """Expose no VCS dir when the launch dir sits below the repository root."""
+        repo = self.make_temp_dir()
+        subdir = repo / "nested"
+        info = launcher.RepoInfo(repo, repo, (repo,))
+
+        self.assertEqual(launcher.vcs_dirs(subdir, info), [])
+
+    def test_adds_jj_default_workspace_dirs(self) -> None:
+        """Expose the default workspace's VCS dirs when launched from another workspace."""
+        base = self.make_temp_dir()
+        default = base / "main"
+        ws = base / "ws1"
+        info = launcher.RepoInfo(ws, default, (default, ws))
+
+        self.assertEqual(
+            launcher.vcs_dirs(ws, info),
+            [ws / ".git", ws / ".jj", default / ".git", default / ".jj"],
+        )
+
+    def test_default_workspace_dirs_are_not_duplicated(self) -> None:
+        """Expose the VCS dirs once when launched from the default workspace itself."""
+        default = self.make_temp_dir()
+        info = launcher.RepoInfo(default, default, (default,))
+
+        self.assertEqual(
+            launcher.vcs_dirs(default, info),
+            [default / ".git", default / ".jj"],
+        )
+
+
+class ExchangeRootTests(TempDirTestCase):
+    """Test the identity directory keying the exchange dir."""
+
+    def test_cwd_outside_a_repo(self) -> None:
+        """Key on the launch dir when it is not in a repository."""
+        cwd = self.make_temp_dir()
+
+        self.assertEqual(launcher.exchange_root(cwd, None), cwd)
+
+    def test_git_repo_root(self) -> None:
+        """Key on the repository root in a git repository."""
+        repo = self.make_temp_dir()
+        subdir = repo / "nested"
+
+        info = launcher.RepoInfo(repo, None, None)
+
+        self.assertEqual(launcher.exchange_root(subdir, info), repo)
+
+    def test_jj_workspaces_share_a_root(self) -> None:
+        """Key every workspace of a jj repository on their shared directory."""
+        base = self.make_temp_dir()
+        roots = [base / "proj/main", base / "proj/ws1"]
+        for root in roots:
+            root.mkdir(parents=True)
+        info = launcher.RepoInfo(roots[1], roots[0], tuple(roots))
+
+        self.assertEqual(launcher.exchange_root(roots[1], info), base / "proj")
 
 
 class ParseCpuListTests(unittest.TestCase):
@@ -587,6 +854,22 @@ class ResolveJjTests(TempDirTestCase):
         """Return None when no jj is on PATH."""
         with unittest.mock.patch.dict(os.environ, {"PATH": str(self.make_temp_dir())}):
             self.assertIsNone(launcher.resolve_jj())
+
+
+class RunCaptureTests(unittest.TestCase):
+    """Test command output capture."""
+
+    def test_returns_stdout(self) -> None:
+        """Return the standard output of a successful command."""
+        self.assertEqual(launcher.run_capture(["echo", "out"]), "out\n")
+
+    def test_returns_none_on_failure(self) -> None:
+        """Return None when the command exits non-zero."""
+        self.assertIsNone(launcher.run_capture(["false"]))
+
+    def test_returns_none_when_command_is_missing(self) -> None:
+        """Return None when the command cannot be run at all."""
+        self.assertIsNone(launcher.run_capture(["/nonexistent/command"]))
 
 
 class GitToplevelTests(TempDirTestCase):

@@ -372,6 +372,25 @@ def proxy_setup() -> tuple[Mount, dict[str, str]] | None:
     return Mount(PROXY_CA_BUNDLE, None, MountKind.BIND_RO), env
 
 
+def resolve_agent_binary(candidates: collections.abc.Sequence[Path]) -> Path | None:
+    """Return the first candidate agent binary that is executable, or None if none is."""
+    return next(
+        (candidate for candidate in candidates if os.access(candidate, os.X_OK)), None
+    )
+
+
+def resolve_extra_agents(entry: str) -> dict[str, Path]:
+    """Map each installed always-provisioned agent other than entry to its binary."""
+    resolved: dict[str, Path] = {}
+    for name, candidates in ALWAYS_PROVISIONED_AGENTS.items():
+        if name == entry:
+            continue
+        binary = resolve_agent_binary(candidates)
+        if binary is not None:
+            resolved[name] = binary
+    return resolved
+
+
 AGENT = Path(sys.argv[1]).name
 DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
 
@@ -552,6 +571,12 @@ AGENT_MOUNTS: dict[str, list[Mount]] = {
     ],
 }
 
+# extra agents provisioned beside the launched one when installed, mapped to candidate
+# binary paths probed in order to detect the install
+ALWAYS_PROVISIONED_AGENTS: dict[str, list[Path]] = {
+    "pi": [Path("/usr/bin/pi"), HOME / ".local/libexec/pi/pi"],
+}
+
 # symlinks in sandbox
 SYMLINKS = {
     Path("/usr/bin"): Path("/bin"),
@@ -610,14 +635,26 @@ if __name__ == "__main__":
         "/proc",
     ]
 
-    # static mounts
-    mounts = list(MOUNTS) + AGENT_MOUNTS.get(AGENT, [])
+    # agents provisioned in the sandbox: the launched one and any installed always-on extra
+    extras = resolve_extra_agents(AGENT)
+    agents = [AGENT, *extras]
+
+    # static mounts plus each agent's, deduplicated where agents share a mount
+    mounts = list(MOUNTS)
+    seen_agent_mounts: set[Mount] = set()
+    for name in agents:
+        for agent_mount in AGENT_MOUNTS.get(name, []):
+            if agent_mount not in seen_agent_mounts:
+                seen_agent_mounts.add(agent_mount)
+                mounts.append(agent_mount)
 
     # jujutsu default workspace
     jj_default_ws_root = REPO_INFO.jj_default_ws_root if REPO_INFO is not None else None
     if (jj_default_ws_root is not None) and not CWD.is_relative_to(jj_default_ws_root):
-        for subdir in [".jj", ".git"]:
-            mounts.append(Mount(jj_default_ws_root / subdir, None, MountKind.BIND_RO))
+        mounts.extend(
+            Mount(jj_default_ws_root / subdir, None, MountKind.BIND_RO)
+            for subdir in (".jj", ".git")
+        )
 
     # remap claude memory from different workspaces of the same repo
     memory_env: dict[str, str] = {}
@@ -630,12 +667,19 @@ if __name__ == "__main__":
             / "memory"
         )
 
-    # bind target binary
-    agent_bin = shutil.which(sys.argv[1])
-    assert agent_bin is not None
-    agent_bin = Path(agent_bin)
-    if not agent_bin.is_relative_to("/usr"):
-        mounts.append(Mount(agent_bin, None, MountKind.BIND_RO))
+    # bind each provisioned agent's binary and ~/.local/bin wrapper so any can launch the
+    # others; the SANDBOX_BIN_DIR shim reduces the wrapper's nested re-exec to a passthrough
+    entry_bin = shutil.which(sys.argv[1])
+    assert entry_bin is not None
+    mounts.extend(
+        Mount(binary, None, MountKind.BIND_RO)
+        for binary in [Path(entry_bin), *extras.values()]
+        if not binary.is_relative_to("/usr")
+    )
+    for name in agents:
+        wrapper = HOME / ".local/bin" / name
+        if wrapper.exists():
+            mounts.append(Mount(wrapper, None, MountKind.BIND_RO))
 
     # exchange dir in /run, shared across a jj repo's workspaces
     if REPO_INFO is None:
@@ -729,32 +773,37 @@ if __name__ == "__main__":
             b'#!/bin/bash\nexec $(type -aP -- jj | uniq | tail -n +2 | head -n 1) --ignore-working-copy "$@"\n',
             executable=True,
         ),
+        # passthrough shim: inside the sandbox an agent wrapper's re-exec of this launcher
+        # runs the target agent directly, since provisioning already happened
+        SANDBOX_BIN_DIR / "sandbox-coding-agent": File(
+            b'#!/bin/sh\nexec "$@"\n', executable=True
+        ),
     }
     cpu_topology = gen_cpu_topology()
     if cpu_topology is not None:
         files[CPU_TOPOLOGY_PATH] = File(cpu_topology)
-    try:
-        global_agents_md_path = GLOBAL_AGENTS_MD[AGENT]
-    except KeyError:
-        pass
-    else:
-        files[global_agents_md_path] = File(
-            gen_global_agents_md(
-                exchange_dir,
-                has_unjaild=(unjail_xdg is not None) and (unjail is not None),
-                has_proxy=proxy is not None,
-                dir_mounts=dir_mounts,
-            )
+    global_agents_md = File(
+        gen_global_agents_md(
+            exchange_dir,
+            has_unjaild=(unjail_xdg is not None) and (unjail is not None),
+            has_proxy=proxy is not None,
+            dir_mounts=dir_mounts,
         )
-    if AGENT == "codex":
-        # avoid "do you trust this directory?" prompt
-        with (XDG_CONFIG_HOME / "codex/config.toml").open("rt") as f:
-            files[HOME / ".codex/config.toml"] = File(
-                f'{f.read()}\n[projects."{CWD!s}"]\ntrust_level = "trusted"\n'.encode()
+    )
+    for name in agents:
+        if agents_md_path := GLOBAL_AGENTS_MD.get(name):
+            files[agents_md_path] = global_agents_md
+        if name == "codex":
+            # avoid "do you trust this directory?" prompt
+            with (XDG_CONFIG_HOME / "codex/config.toml").open("rt") as f:
+                files[HOME / ".codex/config.toml"] = File(
+                    f'{f.read()}\n[projects."{CWD!s}"]\ntrust_level = "trusted"\n'.encode()
+                )
+        elif name == "pi":
+            # pi needs persistent npm modules for its extensions
+            files[HOME / ".npmrc"] = File(
+                f"prefix={HOME / '.pi/agent/npm'!s}\n".encode()
             )
-    elif AGENT == "pi":
-        # pi needs to have persistent npm modules fo its extensions
-        files[HOME / ".npmrc"] = File(f"prefix={HOME / '.pi/agent/npm'!s}\n".encode())
     for path, file in files.items():
         fd = memfd_data(file.data)
         # bwrap defaults --ro-bind-data to mode 0600, so only override for executables

@@ -86,6 +86,12 @@ class TempDirTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, path, ignore_errors=True)
         return path
 
+    def make_executable(self, path: Path) -> Path:
+        """Create an executable file at path and return it."""
+        path.write_text("")
+        path.chmod(0o755)
+        return path
+
     def make_git_repo(self) -> Path:
         """Create a self-cleaning temporary git repository."""
         repo = self.make_temp_dir()
@@ -314,6 +320,70 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertIn("`gh` is available and authenticated", with_bullet)
         self.assertNotIn("`gh`", without_bullet)
+
+
+class ResolveAgentBinaryTests(TempDirTestCase):
+    """Test resolution of an agent binary from candidate paths."""
+
+    def test_returns_first_executable_candidate(self) -> None:
+        """Return the first executable candidate, skipping a missing one."""
+        base = self.make_temp_dir()
+        present = self.make_executable(base / "present")
+
+        self.assertEqual(
+            launcher.resolve_agent_binary([base / "missing", present]), present
+        )
+
+    def test_prefers_earlier_candidate(self) -> None:
+        """Return the earliest candidate when several are executable."""
+        base = self.make_temp_dir()
+        first = self.make_executable(base / "first")
+        second = self.make_executable(base / "second")
+
+        self.assertEqual(launcher.resolve_agent_binary([first, second]), first)
+
+    def test_skips_non_executable_candidate(self) -> None:
+        """Skip a candidate that exists but is not executable."""
+        base = self.make_temp_dir()
+        plain = base / "plain"
+        plain.write_text("")
+        executable = self.make_executable(base / "runnable")
+
+        self.assertEqual(launcher.resolve_agent_binary([plain, executable]), executable)
+
+    def test_returns_none_when_no_candidate_exists(self) -> None:
+        """Return None when none of the candidates exist."""
+        base = self.make_temp_dir()
+
+        self.assertIsNone(launcher.resolve_agent_binary([base / "a", base / "b"]))
+
+
+class ResolveExtraAgentsTests(TempDirTestCase):
+    """Test which always-provisioned agents are added beside the launched one."""
+
+    def test_includes_installed_extra(self) -> None:
+        """Map an installed extra agent to its resolved binary."""
+        pi_bin = self.make_executable(self.make_temp_dir() / "pi")
+        with unittest.mock.patch.object(
+            launcher, "ALWAYS_PROVISIONED_AGENTS", {"pi": [pi_bin]}
+        ):
+            self.assertEqual(launcher.resolve_extra_agents("claude"), {"pi": pi_bin})
+
+    def test_excludes_uninstalled_extra(self) -> None:
+        """Drop an extra agent whose binary is absent."""
+        base = self.make_temp_dir()
+        with unittest.mock.patch.object(
+            launcher, "ALWAYS_PROVISIONED_AGENTS", {"pi": [base / "pi"]}
+        ):
+            self.assertEqual(launcher.resolve_extra_agents("claude"), {})
+
+    def test_excludes_entry_agent(self) -> None:
+        """Skip the launched agent even when it is an always-provisioned one."""
+        pi_bin = self.make_executable(self.make_temp_dir() / "pi")
+        with unittest.mock.patch.object(
+            launcher, "ALWAYS_PROVISIONED_AGENTS", {"pi": [pi_bin]}
+        ):
+            self.assertEqual(launcher.resolve_extra_agents("pi"), {})
 
 
 class ProxySetupTests(unittest.TestCase):

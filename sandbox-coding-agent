@@ -659,7 +659,7 @@ AGENTS: dict[str, AgentSpec] = {
             Mount(XDG_CACHE_HOME / "amp", MountKind.BIND_RW, HOME / ".amp"),
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
-                MountKind.BIND_RW,
+                MountKind.BIND_RO,
                 HOME / ".config/agents/skills",
             ),
             Mount(XDG_CONFIG_HOME / "amp", MountKind.BIND_RW, HOME / ".config/amp"),
@@ -671,7 +671,7 @@ AGENTS: dict[str, AgentSpec] = {
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
-                MountKind.BIND_RW,
+                MountKind.BIND_RO,
                 HOME / ".claude/skills",
             ),
             Mount(XDG_CONFIG_HOME / "claude", MountKind.BIND_RW, HOME / ".claude"),
@@ -690,7 +690,7 @@ AGENTS: dict[str, AgentSpec] = {
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
-                MountKind.BIND_RW,
+                MountKind.BIND_RO,
                 HOME / ".agents/skills",
             ),
             Mount(XDG_CONFIG_HOME / "codex", MountKind.BIND_RW, HOME / ".codex"),
@@ -702,7 +702,7 @@ AGENTS: dict[str, AgentSpec] = {
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
-                MountKind.BIND_RW,
+                MountKind.BIND_RO,
                 HOME / ".agents/skills",
             ),
             Mount(XDG_CONFIG_HOME / "pi", MountKind.BIND_RW, HOME / ".pi"),

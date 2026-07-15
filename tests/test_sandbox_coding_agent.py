@@ -208,6 +208,26 @@ class HomeToolsTests(unittest.TestCase):
         self.assertIn("myeditor", module.HOME_TOOLS)
 
 
+class AgentSpecsTests(unittest.TestCase):
+    """Test agent-specific sandbox provisioning."""
+
+    def test_skill_dirs_are_read_only(self) -> None:
+        """Expose the shared skill directory read-only for every supported agent."""
+        skill_dir = FAKE_CONFIG_HOME / "agents/skills"
+
+        skill_mounts = [
+            mount
+            for spec in launcher.AGENTS.values()
+            for mount in spec.mounts
+            if mount.src == skill_dir
+        ]
+
+        self.assertEqual(len(skill_mounts), len(launcher.AGENTS))
+        self.assertTrue(
+            all(mount.kind is launcher.MountKind.BIND_RO for mount in skill_mounts)
+        )
+
+
 class MemfdDataTests(unittest.TestCase):
     """Test memfd creation."""
 

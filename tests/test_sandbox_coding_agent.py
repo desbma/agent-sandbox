@@ -192,6 +192,39 @@ class MountKindTests(unittest.TestCase):
         )
 
 
+class ResolveMountsTests(unittest.TestCase):
+    """Test mount deduplication, ordering, and launch-dir precedence."""
+
+    def test_orders_parents_before_children(self) -> None:
+        """Sort mounts so a parent target precedes any nested one."""
+        child = launcher.Mount(Path("/a/b/c"), launcher.MountKind.BIND_RO)
+        parent = launcher.Mount(Path("/a"), launcher.MountKind.BIND_RO)
+
+        resolved = launcher.resolve_mounts([child, parent], Path("/cwd"))
+
+        self.assertEqual(resolved, [parent, child])
+
+    def test_drops_exact_duplicates(self) -> None:
+        """Collapse identical mounts to a single entry."""
+        mount = launcher.Mount(Path("/a"), launcher.MountKind.BIND_RO)
+
+        resolved = launcher.resolve_mounts([mount, mount], Path("/cwd"))
+
+        self.assertEqual(resolved, [mount])
+
+    def test_launch_dir_stays_writable_over_read_only_collision(self) -> None:
+        """Drop a read-only mount that resolves onto the writable launch directory."""
+        cwd = Path("/home/user/.config/agents/skills")
+        writable = launcher.Mount(cwd, launcher.MountKind.BIND_RW)
+        skills = launcher.Mount(
+            Path("/xdg/agents/skills"), launcher.MountKind.BIND_RO, cwd
+        )
+
+        resolved = launcher.resolve_mounts([writable, skills], cwd)
+
+        self.assertEqual([m for m in resolved if m.target == cwd], [writable])
+
+
 class HomeToolsTests(unittest.TestCase):
     """Test HOME_TOOLS construction from the environment."""
 

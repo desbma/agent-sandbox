@@ -795,6 +795,21 @@ class AgentSpecificTests(SandboxTestCase):
         # created as mount point leaks to the bind-mounted host config dir
         self.assertEqual((self.fixture.config_home / "amp/AGENTS.md").read_text(), "")
 
+    def test_launch_inside_skill_dir_stays_writable(self) -> None:
+        """Keep the launch dir writable when it is the agent's read-only skill dir."""
+        (self.fixture.config_home / "agents/skills").mkdir(parents=True)
+        cwd = self.fixture.home / ".config/agents/skills"
+        cwd.mkdir(parents=True)
+
+        report = self.run_probe(
+            [Op("write", OpKind.WRITE, cwd / "new-skill.txt")],
+            agent="amp",
+            cwd=cwd,
+        )
+
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual((cwd / "new-skill.txt").read_text(), "canary")
+
     def test_first_launch_creates_missing_agent_dirs(self) -> None:
         """Create missing read-write mount sources on the host at first launch."""
         shutil.rmtree(self.fixture.config_home / "claude")

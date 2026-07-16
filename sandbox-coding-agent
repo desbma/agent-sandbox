@@ -283,6 +283,21 @@ def cargo_target_mounts() -> list[Mount]:
     return [Mount(target_dir, MountKind.OVERLAYFS)]
 
 
+def resolve_mounts(raw: collections.abc.Iterable[Mount], cwd: Path) -> list[Mount]:
+    """Deduplicate mounts and order them parents-first, keeping the launch dir writable.
+
+    bwrap applies mounts in order, each shadowing the earlier ones it overlaps, so a child
+    must follow its parent, and a read-only bind colliding with the cwd is dropped.
+    """
+    mounts = [
+        mount
+        for mount in dict.fromkeys(raw)
+        if (mount.target != cwd) or (mount.kind is MountKind.BIND_RW)
+    ]
+    mounts.sort(key=lambda mount: (len(mount.target.parts), mount.target.parts))
+    return mounts
+
+
 def claude_path_hash(path: str) -> str:
     """Compute Claude Code's base36 path hash that disambiguates truncated slugs."""
     h = 0
@@ -795,24 +810,21 @@ if __name__ == "__main__":
     # exchange dir in /run, shared across a jj repo's workspaces
     exchange_dir = exchange_dir_path(XDG_RUNTIME_DIR, exchange_root(CWD, REPO_INFO))
 
-    # static mounts plus every conditional one, deduplicated where they overlap
-    mounts = list(
-        dict.fromkeys(
-            [
-                *MOUNTS,
-                *(mount for spec in agents.values() for mount in spec.mounts),
-                *agent_binary_mounts(agents, extras),
-                *exchange_mounts(exchange_dir),
-                *tool_mounts(),
-                *cargo_target_mounts(),
-                *UNJAIL_MOUNTS,
-                *PROXY_MOUNTS,
-            ],
-        )
+    # static mounts plus every conditional one, deduplicated and ordered for bwrap
+    mounts = resolve_mounts(
+        [
+            *MOUNTS,
+            *(mount for spec in agents.values() for mount in spec.mounts),
+            *agent_binary_mounts(agents, extras),
+            *exchange_mounts(exchange_dir),
+            *tool_mounts(),
+            *cargo_target_mounts(),
+            *UNJAIL_MOUNTS,
+            *PROXY_MOUNTS,
+        ],
+        CWD,
     )
 
-    # build mount arguments, shortest target path first to avoid shadowing
-    mounts.sort(key=lambda m: (len(m.target.parts), m.target.parts))
     dir_mounts: dict[MountKind, list[Path]] = collections.defaultdict(list)
     for mount in mounts:
         if not mount.src.exists():  # NB: may exist as a file

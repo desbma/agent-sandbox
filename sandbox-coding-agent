@@ -438,14 +438,23 @@ def gen_cpu_topology() -> bytes | None:
     return f"{counts}\npin={pin_line}".encode()
 
 
+def read_instructions(path: Path) -> str | None:
+    """Return the stripped content of a user instructions file, or None if it does not exist."""
+    try:
+        return path.read_text().strip()
+    except FileNotFoundError:
+        return None
+
+
 def gen_global_agents_md(
+    agent: str,
     exchange_dir: Path | None,
     *,
     has_unjaild: bool,
     has_proxy: bool,
     dir_mounts: dict[MountKind, list[Path]],
 ) -> bytes:
-    """Generate the global AGENTS.md: the user's base file plus the sandbox section."""
+    """Generate the global AGENTS.md: the user's base and agent files plus the sandbox section."""
     filesystem_note = [
         "You have a different view of the filesystem than the user. Some notable mount points in your environment are:",
     ]
@@ -466,14 +475,23 @@ def gen_global_agents_md(
             "`gh` is available and authenticated; use it to read and search GitHub.",
         )
 
-    addition = f"{GLOBAL_AGENTS_MD_INTRO}\n" + "\n".join(
+    sandbox_section = f"{GLOBAL_AGENTS_MD_INTRO}\n" + "\n".join(
         f"- {bullet}" for bullet in bullets
     )
-    try:
-        base = (XDG_CONFIG_HOME / "agents/AGENTS.md").read_text().strip()
-    except FileNotFoundError:
-        return f"{addition}\n".encode()
-    return f"{base}\n\n{addition}\n".encode()
+    user_paths = (
+        XDG_CONFIG_HOME / "agents/AGENTS.md",
+        XDG_CONFIG_HOME / f"agents/AGENTS.{agent}.md",
+    )
+    sections = [
+        *(
+            instructions
+            for path in user_paths
+            if (instructions := read_instructions(path)) is not None
+        ),
+        sandbox_section,
+    ]
+    body = "\n\n".join(sections)
+    return f"{body}\n".encode()
 
 
 def resolve_extra_agents(entry: str) -> dict[str, Path]:
@@ -841,17 +859,17 @@ if __name__ == "__main__":
     cpu_topology = gen_cpu_topology()
     if cpu_topology is not None:
         files[CPU_TOPOLOGY_PATH] = File(cpu_topology)
-    global_agents_md = File(
-        gen_global_agents_md(
-            exchange_dir,
-            has_unjaild=bool(UNJAIL_MOUNTS),
-            has_proxy=PROXY_ACTIVE,
-            dir_mounts=dir_mounts,
-        )
-    )
-    for spec in agents.values():
+    for name, spec in agents.items():
         if spec.agents_md is not None:
-            files[spec.agents_md] = global_agents_md
+            files[spec.agents_md] = File(
+                gen_global_agents_md(
+                    name,
+                    exchange_dir,
+                    has_unjaild=bool(UNJAIL_MOUNTS),
+                    has_proxy=PROXY_ACTIVE,
+                    dir_mounts=dir_mounts,
+                )
+            )
         if spec.files is not None:
             files |= spec.files()
     for path, file in files.items():

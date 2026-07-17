@@ -40,7 +40,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
   - `.git`/`.jj` VCS directories are mounted read-only: the agent can not do commits or change history
   - most of the filesystem (`/etc/`, `/home`, `/run`, `/var`, etc.) is either not mounted or cleaned up to contain a minimal allowlist
   - cache directories used for development (`cargo`, `uv`...) are mounted as OverlayFS: the agent inherits the host's content (major speedup), but the changes it makes are not reflected on the host
-- Injects a small prompt to describe the sandbox to the agent, its directories and mount points, etc.
+- Injects a small prompt to describe the sandbox to the agent, its directories and mount points, etc. It is appended to the agent's global instructions, built from `~/.config/agents/AGENTS.md` and, if present, the agent specific `~/.config/agents/AGENTS.<agent>.md` (ie. `AGENTS.claude.md`)
 - Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
 - Provides an exchange directory for sharing files that don't belong in the repository
 - Exposes `/dev/kvm`, so the agent can run nested VMs: this is what lets `agent-microvm` work from inside the sandbox

@@ -341,22 +341,26 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
     """Test generation of the agent's global instructions file."""
 
     def setUp(self) -> None:
-        """Ensure the base AGENTS.md location exists and starts absent."""
+        """Ensure the base and per-agent AGENTS.md locations exist and start absent."""
         self.base_path = FAKE_CONFIG_HOME / "agents/AGENTS.md"
-        self.base_path.parent.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(self.base_path.unlink, missing_ok=True)
-        self.base_path.unlink(missing_ok=True)
+        self.agent_path = FAKE_CONFIG_HOME / "agents/AGENTS.claude.md"
+        for path in (self.base_path, self.agent_path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.addCleanup(path.unlink, missing_ok=True)
+            path.unlink(missing_ok=True)
 
     def render(
         self,
         exchange_dir: Path | None = None,
         *,
+        agent: str = "claude",
         has_unjaild: bool = False,
         has_proxy: bool = False,
         dir_mounts: dict[object, list[Path]] | None = None,
     ) -> str:
         """Generate the instructions file content with defaults for all knobs."""
         return launcher.gen_global_agents_md(
+            agent,
             exchange_dir,
             has_unjaild=has_unjaild,
             has_proxy=has_proxy,
@@ -377,6 +381,33 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertTrue(content.startswith("## Sandbox environment\n"))
         self.assertTrue(content.endswith("\n"))
+
+    def test_agent_file_between_base_and_section(self) -> None:
+        """Insert the per-agent file after the base instructions, before the sandbox section."""
+        self.base_path.write_text("# my base\n")
+        self.agent_path.write_text("# claude only\n")
+
+        content = self.render()
+
+        self.assertTrue(
+            content.startswith("# my base\n\n# claude only\n\n## Sandbox environment\n")
+        )
+
+    def test_agent_file_without_base_file(self) -> None:
+        """Emit the per-agent file before the sandbox section when the base is missing."""
+        self.agent_path.write_text("# claude only\n")
+
+        content = self.render()
+
+        self.assertTrue(content.startswith("# claude only\n\n## Sandbox environment\n"))
+
+    def test_agent_file_of_another_agent_ignored(self) -> None:
+        """Read the per-agent file of the rendered agent only."""
+        self.agent_path.write_text("# claude only\n")
+
+        content = self.render(agent="codex")
+
+        self.assertNotIn("claude only", content)
 
     def test_filesystem_bullet_lists_mounts_by_kind(self) -> None:
         """List directory mounts grouped by kind, in display order."""

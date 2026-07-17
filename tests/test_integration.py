@@ -24,6 +24,8 @@ INTEGRATION_ENABLED = os.environ.get(INTEGRATION_ENV_VAR) is not None
 SKIP_REASON = f"Set {INTEGRATION_ENV_VAR} to start real sandboxes for these tests"
 LAUNCH_TIMEOUT_SECONDS = 60.0
 BASE_INSTRUCTIONS = "# itest base instructions\n"
+AGENT_INSTRUCTIONS = "# itest agent instructions\n"
+EXTRA_AGENT_INSTRUCTIONS = "# itest extra agent instructions\n"
 TEST_TERM = "xterm-itest"
 # the group names the launcher copies from the host (its GROUPS constant)
 COPIED_GROUPS = ("kvm", "nobody", "nogroup")
@@ -577,6 +579,53 @@ class InstructionsTests(SandboxTestCase):
         self.assertNotIn("xdg-open", content)
         self.assertNotIn("`gh`", content)
         self.assertEqual(report["mode"], "0o600")
+
+    def test_instructions_include_agent_file(self) -> None:
+        """Inline the agent's own instructions file between the base and the sandbox section."""
+        (self.fixture.config_home / "agents/AGENTS.claude.md").write_text(
+            AGENT_INSTRUCTIONS
+        )
+
+        report = self.run_probe(
+            [Op("claude_md", OpKind.READ, self.fixture.home / ".claude/CLAUDE.md")],
+            agent="claude",
+        )
+
+        content = self.report_str(report, "claude_md")
+        self.assertTrue(
+            content.startswith(
+                f"{BASE_INSTRUCTIONS.strip()}\n\n{AGENT_INSTRUCTIONS.strip()}\n\n"
+                "## Sandbox environment\n"
+            )
+        )
+
+    def test_instructions_of_extra_agent_use_its_own_file(self) -> None:
+        """Give an always-provisioned extra agent its own instructions file, not the launched one's."""
+        pi = self.fixture.home / ".local/libexec/pi/pi"
+        pi.parent.mkdir(parents=True)
+        pi.write_text(EXECUTABLE_STUB)
+        pi.chmod(0o755)
+        (self.fixture.config_home / "agents/AGENTS.claude.md").write_text(
+            AGENT_INSTRUCTIONS
+        )
+        (self.fixture.config_home / "agents/AGENTS.pi.md").write_text(
+            EXTRA_AGENT_INSTRUCTIONS
+        )
+
+        report = self.run_probe(
+            [
+                Op("claude_md", OpKind.READ, self.fixture.home / ".claude/CLAUDE.md"),
+                Op("pi_md", OpKind.READ, self.fixture.home / ".pi/agent/AGENTS.md"),
+            ],
+            agent="claude",
+        )
+
+        claude_md = self.report_str(report, "claude_md")
+        pi_md = self.report_str(report, "pi_md")
+        self.assertIn(AGENT_INSTRUCTIONS.strip(), claude_md)
+        self.assertNotIn(EXTRA_AGENT_INSTRUCTIONS.strip(), claude_md)
+        self.assertIn(EXTRA_AGENT_INSTRUCTIONS.strip(), pi_md)
+        self.assertNotIn(AGENT_INSTRUCTIONS.strip(), pi_md)
 
     def test_instructions_without_base_file(self) -> None:
         """Generate only the sandbox section when the user has no base file."""

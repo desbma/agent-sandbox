@@ -40,10 +40,18 @@ The sandbox and microVM scripts were preceded by experiments with different cont
   - `.git`/`.jj` VCS directories are mounted read-only: the agent can not do commits or change history
   - most of the filesystem (`/etc/`, `/home`, `/run`, `/var`, etc.) is either not mounted or cleaned up to contain a minimal allowlist
   - cache directories used for development (`cargo`, `uv`...) are mounted as OverlayFS: the agent inherits the host's content (major speedup), but the changes it makes are not reflected on the host
+  - project build directories (Rust `target/`, Python `.venv`) are mounted as OverlayFS as well: reusing the artifacts already built on the host avoids full rebuilds, which can save minutes on big projects
+- Provides an exchange directory for sharing files that don't belong in the repository
+- [Jujutsu](https://jj-vcs.github.io/jj/) aware:
+  - `jj` is wrapped to always run with `--ignore-working-copy`, which keeps it usable despite the read-only `.jj` directory
+  - the default workspace's VCS directories are exposed alongside the current one, so commands still work from a secondary workspace
+  - the exchange directory and Claude Code's project memory are shared between all workspaces of a repository
 - Injects a small prompt to describe the sandbox to the agent, its directories and mount points, etc. It is appended to the agent's global instructions, built from `~/.config/agents/AGENTS.md` and, if present, the agent specific `~/.config/agents/AGENTS.<agent>.md` (ie. `AGENTS.claude.md`)
 - Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
-- Provides an exchange directory for sharing files that don't belong in the repository
-- Exposes `/dev/kvm`, so the agent can run nested VMs: this is what lets `agent-microvm` work from inside the sandbox
+- Provisions the other installed agents alongside the one being launched, so it can spawn them as subagents, typically to get a review from a different model
+- Applies per-agent quality of life fixes: Codex CLI trusts the launch directory instead of prompting about it, Pi keeps its extension modules in its own state directory, etc.
+- Safeguards against accidental launches from the wrong directory: the home directory is rejected, and a repository subdirectory offers to switch to the repository root
+- Exposes `/dev/kvm` and the host CPU topology, so the agent can run nested VMs with a matching core layout and pinned vCPUs: this is what lets `agent-microvm` work from inside the sandbox
 - Optionally routes `gh` through [`agent-proxy`](#agent-proxy), so the GitHub API works inside the sandbox without ever exposing the token to the agent
 
 **Network isolation is out of scope: the agent has access to the same network as the host.**

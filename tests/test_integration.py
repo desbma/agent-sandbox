@@ -29,11 +29,12 @@ EXTRA_AGENT_INSTRUCTIONS = "# itest extra agent instructions\n"
 TEST_TERM = "xterm-itest"
 # the group names the launcher copies from the host (its GROUPS constant)
 COPIED_GROUPS = ("kvm", "nobody", "nogroup")
-JJ_WRAPPER = (
-    "#!/bin/bash\n"
-    'exec $(type -aP -- jj | uniq | tail -n +2 | head -n 1) --ignore-working-copy "$@"\n'
-)
 EXECUTABLE_STUB = "#!/bin/sh\nexit 0\n"
+# real jj, skipping the read-only wrapper an enclosing agent sandbox puts on PATH
+JJ_BIN = shutil.which(
+    "jj",
+    path=os.pathsep.join(entry for entry in os.get_exec_path() if entry != "/run/bin"),
+)
 SYS_CPU_ONLINE = Path("/sys/devices/system/cpu/online")
 
 
@@ -136,6 +137,19 @@ class SandboxTestCase(unittest.TestCase):
         git = shutil.which("git")
         assert git is not None
         (self.fixture.tools_dir / "git").symlink_to(git)
+
+    def make_project_jj_repo(self) -> None:
+        """Turn the fixture project into a jj repository, with jj reachable from the launcher."""
+        assert JJ_BIN is not None
+        (self.fixture.tools_dir / "jj").symlink_to(JJ_BIN)
+        subprocess.run(
+            [JJ_BIN, "git", "init", str(self.fixture.project_dir)],
+            env=self.fixture.env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
 
     def run_launcher(
         self,
@@ -426,18 +440,43 @@ class GeneratedFileTests(SandboxTestCase):
             report["nsswitch"], "passwd: files\ngroup: files\nhosts: files dns\n"
         )
 
+    @unittest.skipUnless(JJ_BIN is not None, "jj is not installed")
     def test_jj_wrapper(self) -> None:
-        """Install the read-only jj wrapper in the sandbox bin directory."""
+        """Provision the jj wrapper and advertise it, with the real binary, inside a jj repository."""
+        self.make_project_jj_repo()
+
         report = self.run_probe(
             [
-                Op("wrapper", OpKind.READ, "/run/bin/jj"),
                 Op("mode", OpKind.MODE, "/run/bin/jj"),
+                Op(
+                    "instructions",
+                    OpKind.READ,
+                    self.fixture.home / ".claude/CLAUDE.md",
+                ),
             ],
             agent="claude",
         )
 
-        self.assertEqual(report["wrapper"], JJ_WRAPPER)
         self.assertEqual(report["mode"], "0o700")
+        instructions = self.report_str(report, "instructions")
+        self.assertIn("use it for read-only queries in this repository", instructions)
+        self.assertIn(f"`{self.fixture.tools_dir / 'jj'}`", instructions)
+
+    @unittest.skipUnless(JJ_BIN is not None, "jj is not installed")
+    def test_no_jj_hint_outside_jj_repo(self) -> None:
+        """Omit the jj hint outside a jj repository even when jj is available."""
+        assert JJ_BIN is not None
+        (self.fixture.tools_dir / "jj").symlink_to(JJ_BIN)
+
+        report = self.run_probe(
+            [Op("instructions", OpKind.READ, self.fixture.home / ".claude/CLAUDE.md")],
+            agent="claude",
+        )
+
+        self.assertNotIn(
+            "wrapper adding `--ignore-working-copy`",
+            self.report_str(report, "instructions"),
+        )
 
     @unittest.skipUnless(
         SYS_CPU_ONLINE.is_file(), "host sysfs CPU topology is unavailable"

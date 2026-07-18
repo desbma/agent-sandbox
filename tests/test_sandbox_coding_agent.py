@@ -3,6 +3,7 @@
 import atexit
 import collections.abc
 import contextlib
+import dataclasses
 import grp
 import importlib.machinery
 import importlib.util
@@ -78,6 +79,15 @@ def load_launcher(
 
 launcher = load_launcher()
 atexit.register(shutil.rmtree, FIXTURE_ROOT, ignore_errors=True)
+
+# sandbox facts with every optional element absent, base for the instructions rendering tests
+EMPTY_SANDBOX_FACTS = launcher.SandboxFacts(
+    exchange_dir=None,
+    dir_mounts={},
+    has_unjaild=False,
+    has_proxy=False,
+    jj_bin=None,
+)
 
 
 class TempDirTestCase(unittest.TestCase):
@@ -351,22 +361,10 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
             self.addCleanup(path.unlink, missing_ok=True)
             path.unlink(missing_ok=True)
 
-    def render(
-        self,
-        exchange_dir: Path | None = None,
-        *,
-        agent: str = "claude",
-        has_unjaild: bool = False,
-        has_proxy: bool = False,
-        dir_mounts: dict[object, list[Path]] | None = None,
-    ) -> str:
-        """Generate the instructions file content with defaults for all knobs."""
+    def render(self, agent: str = "claude", **facts: object) -> str:
+        """Generate the instructions file content, overriding the given sandbox facts only."""
         return launcher.gen_global_agents_md(
-            agent,
-            exchange_dir,
-            has_unjaild=has_unjaild,
-            has_proxy=has_proxy,
-            dir_mounts=dir_mounts or {},
+            agent, dataclasses.replace(EMPTY_SANDBOX_FACTS, **facts)
         ).decode()
 
     def test_appends_section_to_base_file(self) -> None:
@@ -430,7 +428,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
     def test_exchange_dir_bullet(self) -> None:
         """Mention the exchange directory only when one exists."""
-        with_bullet = self.render(Path("/run/user/1000/exchange"))
+        with_bullet = self.render(exchange_dir=Path("/run/user/1000/exchange"))
         without_bullet = self.render()
 
         self.assertIn("place them under `/run/user/1000/exchange`", with_bullet)
@@ -451,6 +449,15 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertIn("`gh` is available and authenticated", with_bullet)
         self.assertNotIn("`gh`", without_bullet)
+
+    def test_jj_wrapper_bullet(self) -> None:
+        """Mention the jj wrapper and the real binary only inside a jj workspace."""
+        with_bullet = self.render(jj_bin="/opt/bin/jj")
+        without_bullet = self.render()
+
+        self.assertIn(f"`{launcher.SANDBOX_BIN_DIR / 'jj'}`", with_bullet)
+        self.assertIn("`/opt/bin/jj`", with_bullet)
+        self.assertNotIn("jj", without_bullet)
 
 
 class ResolveExtraAgentsTests(TempDirTestCase):
@@ -556,6 +563,51 @@ class ClaudeMemoryEnvTests(TempDirTestCase):
                     FAKE_HOME / ".claude/projects" / slug / "memory"
                 )
             },
+        )
+
+
+class JjWrapperFileTests(TempDirTestCase):
+    """Test provisioning of the read-only jj wrapper."""
+
+    def test_absent_outside_jj_repo(self) -> None:
+        """Provision no jj wrapper when the launch directory is outside a jj repository."""
+        self.assertNotIn(launcher.SANDBOX_BIN_DIR / "jj", launcher.FILES)
+
+    @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
+    def test_provisioned_inside_jj_repo(self) -> None:
+        """Provision the jj wrapper when the launch directory is inside a jj repository."""
+        repo = self.make_jj_repo(self.make_temp_dir() / "repo")
+
+        module = load_launcher(cwd=repo)
+
+        self.assertIn(module.SANDBOX_BIN_DIR / "jj", module.FILES)
+
+    def test_invokes_real_jj_with_ignore_working_copy(self) -> None:
+        """Inject the read-only flag while preserving arguments for the next jj on PATH."""
+        base = self.make_temp_dir()
+        wrapper_dir = base / "wrapper"
+        real_dir = base / "real"
+        wrapper_dir.mkdir()
+        real_dir.mkdir()
+        wrapper = wrapper_dir / "jj"
+        wrapper.write_bytes(launcher.JJ_WRAPPER.data)
+        wrapper.chmod(0o755)
+        real = real_dir / "jj"
+        real.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        real.chmod(0o755)
+
+        result = subprocess.run(
+            [wrapper, "log", "-r", "@"],
+            env={
+                "PATH": os.pathsep.join((str(wrapper_dir), str(real_dir), os.defpath))
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertEqual(
+            result.stdout.splitlines(), ["--ignore-working-copy", "log", "-r", "@"]
         )
 
 
@@ -940,6 +992,16 @@ class ResolveJjTests(TempDirTestCase):
         """Return None when no jj is on PATH."""
         with unittest.mock.patch.dict(os.environ, {"PATH": str(self.make_temp_dir())}):
             self.assertIsNone(launcher.resolve_jj())
+
+    def test_uses_default_path_when_path_is_unset(self) -> None:
+        """Search the system default path for jj when PATH is absent."""
+        real_dir = self.make_jj_stub(self.make_temp_dir() / "default-bin")
+
+        with (
+            unittest.mock.patch.object(os, "defpath", str(real_dir)),
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertEqual(launcher.resolve_jj(), str(real_dir / "jj"))
 
 
 class RunCaptureTests(unittest.TestCase):

@@ -771,14 +771,20 @@ class AgentSpecificTests(SandboxTestCase):
 
         self.assertEqual(report["claude_md_exists"], False)
 
-    def test_codex_config_gains_trusted_project(self) -> None:
-        """Append a trusted-project section to the codex config."""
+    def test_codex_trusts_launch_dir_keeping_user_config_writable(self) -> None:
+        """Trust the launch directory from the system layer, leaving the user config writable."""
         (self.fixture.config_home / "codex").mkdir()
         (self.fixture.config_home / "codex/config.toml").write_text('model = "test"\n')
 
         report = self.run_probe(
             [
                 Op("config", OpKind.READ, self.fixture.home / ".codex/config.toml"),
+                Op(
+                    "config_write",
+                    OpKind.WRITE,
+                    self.fixture.home / ".codex/config.toml",
+                ),
+                Op("system_config", OpKind.READ, Path("/etc/codex/config.toml")),
                 Op(
                     "agents_md_exists",
                     OpKind.EXISTS,
@@ -788,12 +794,28 @@ class AgentSpecificTests(SandboxTestCase):
             agent="codex",
         )
 
+        self.assertEqual(report["config"], 'model = "test"\n')
+        self.assertEqual(report["config_write"], "ok")
         self.assertEqual(
-            report["config"],
-            f'model = "test"\n\n[projects."{self.fixture.project_dir}"]\n'
-            'trust_level = "trusted"\n',
+            report["system_config"],
+            f'[projects."{self.fixture.project_dir}"]\ntrust_level = "trusted"\n',
         )
         self.assertEqual(report["agents_md_exists"], True)
+        self.assertEqual(
+            (self.fixture.config_home / "codex/config.toml").read_text(), "canary"
+        )
+
+    def test_codex_creates_user_config_on_first_write(self) -> None:
+        """Persist codex's user config to the host when it does not exist yet."""
+        report = self.run_probe(
+            [Op("write", OpKind.WRITE, self.fixture.home / ".codex/config.toml")],
+            agent="codex",
+        )
+
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual(
+            (self.fixture.config_home / "codex/config.toml").read_text(), "canary"
+        )
 
     def test_pi_gets_npmrc_and_instructions(self) -> None:
         """Generate the npm prefix config and instructions for pi."""

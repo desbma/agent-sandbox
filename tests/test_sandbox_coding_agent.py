@@ -28,10 +28,12 @@ IMPORT_CWD = FIXTURE_ROOT / "cwd"
 
 def load_launcher(
     env_overrides: dict[str, str | None] | None = None,
+    cwd: Path | None = None,
 ) -> types.ModuleType:
     """Load the launcher script as a module under a controlled environment.
 
-    A None value in env_overrides removes that variable from the environment.
+    A None value in env_overrides removes that variable from the environment. The module reads
+    its launch directory at import, so cwd selects the one it resolves its repo layout from.
     """
     for directory in (FAKE_HOME, FAKE_CONFIG_HOME, FAKE_RUNTIME_DIR, IMPORT_CWD):
         directory.mkdir(parents=True, exist_ok=True)
@@ -64,7 +66,7 @@ def load_launcher(
             else:
                 os.environ[key] = value
         sys.argv = [str(SCRIPT_PATH), "claude"]
-        os.chdir(IMPORT_CWD)
+        os.chdir(cwd if cwd is not None else IMPORT_CWD)
         loader.exec_module(module)
     finally:
         sys.argv = saved_argv
@@ -514,47 +516,47 @@ class AgentFilesTests(unittest.TestCase):
     """Test the per-agent generated config files."""
 
     def test_codex_config_trusts_the_launch_directory(self) -> None:
-        """Append a trust entry for the launch directory to the user's codex config."""
-        config = FAKE_CONFIG_HOME / "codex/config.toml"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text('model = "test"\n')
-        self.addCleanup(shutil.rmtree, config.parent, ignore_errors=True)
-
-        content = launcher.codex_files()[FAKE_HOME / ".codex/config.toml"].data.decode()
+        """Trust the launch directory through codex's read-only system config layer."""
+        files = launcher.AGENTS["codex"].files
+        content = files[Path("/etc/codex/config.toml")].data.decode()
 
         self.assertEqual(
             content,
-            f'model = "test"\n\n[projects."{IMPORT_CWD}"]\ntrust_level = "trusted"\n',
+            f'[projects."{IMPORT_CWD}"]\ntrust_level = "trusted"\n',
         )
 
     def test_pi_npmrc_points_at_its_state_dir(self) -> None:
         """Prefix pi's npm modules with its own state directory."""
-        content = launcher.pi_files()[FAKE_HOME / ".npmrc"].data.decode()
+        content = launcher.AGENTS["pi"].files[FAKE_HOME / ".npmrc"].data.decode()
 
         self.assertEqual(content, f"prefix={FAKE_HOME / '.pi/agent/npm'}\n")
 
 
-class ClaudeMemoryEnvTests(unittest.TestCase):
+class ClaudeMemoryEnvTests(TempDirTestCase):
     """Test the Claude memory override keyed on the jj default workspace."""
 
     def test_no_override_without_jj_default_workspace(self) -> None:
         """Leave the memory path alone outside a jj repository."""
-        with unittest.mock.patch.object(launcher, "JJ_DEFAULT_WS_ROOT", None):
-            self.assertEqual(launcher.claude_memory_env(), {})
+        self.assertEqual(launcher.AGENTS["claude"].env, {})
 
+    @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
     def test_override_keyed_on_default_workspace(self) -> None:
-        """Point the memory dir at the default workspace's project slug."""
-        with unittest.mock.patch.object(
-            launcher, "JJ_DEFAULT_WS_ROOT", Path("/home/user/proj")
-        ):
-            self.assertEqual(
-                launcher.claude_memory_env(),
-                {
-                    "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": str(
-                        FAKE_HOME / ".claude/projects/-home-user-proj/memory"
-                    )
-                },
-            )
+        """Point a secondary workspace's memory dir at the default workspace's project slug."""
+        base = self.make_temp_dir()
+        repo = self.make_jj_repo(base / "default")
+        workspace = self.add_jj_workspace(repo, base / "workspace")
+
+        module = load_launcher(cwd=workspace)
+
+        slug = launcher.claude_project_slug(repo)
+        self.assertEqual(
+            module.AGENTS["claude"].env,
+            {
+                "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": str(
+                    FAKE_HOME / ".claude/projects" / slug / "memory"
+                )
+            },
+        )
 
 
 class ProxyTests(unittest.TestCase):

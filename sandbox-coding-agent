@@ -104,8 +104,8 @@ class AgentSpec:
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
-    files: collections.abc.Callable[[], dict[Path, File]] | None = None
-    env: collections.abc.Callable[[], dict[str, str]] | None = None
+    files: dict[Path, File] = dataclasses.field(default_factory=dict)
+    env: dict[str, str] = dataclasses.field(default_factory=dict)
     # binary paths probed in order; a hit provisions this agent in the sandbox even when the
     # launched agent is another one
     provision_always: tuple[Path, ...] = ()
@@ -506,36 +506,6 @@ def resolve_extra_agents(entry: str) -> dict[str, Path]:
     return resolved
 
 
-def claude_memory_env() -> dict[str, str]:
-    """Key Claude's per-project memory on the jj default workspace, sharing it across workspaces."""
-    if JJ_DEFAULT_WS_ROOT is None:
-        return {}
-    # internal and undocumented override
-    return {
-        "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": str(
-            HOME
-            / ".claude/projects"
-            / claude_project_slug(JJ_DEFAULT_WS_ROOT)
-            / "memory"
-        )
-    }
-
-
-def codex_files() -> dict[Path, File]:
-    """Generate the codex config trusting the launch directory, to avoid its confirmation prompt."""
-    config = (XDG_CONFIG_HOME / "codex/config.toml").read_text()
-    return {
-        HOME / ".codex/config.toml": File(
-            f'{config}\n[projects."{CWD}"]\ntrust_level = "trusted"\n'.encode()
-        )
-    }
-
-
-def pi_files() -> dict[Path, File]:
-    """Generate the npm config keeping pi's extension modules in its own state dir."""
-    return {HOME / ".npmrc": File(f"prefix={HOME / '.pi/agent/npm'}\n".encode())}
-
-
 AGENT = Path(sys.argv[1]).name
 DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
 
@@ -716,7 +686,20 @@ AGENTS: dict[str, AgentSpec] = {
             Mount(Path("/opt/claude-code"), MountKind.BIND_RO),
         ),
         symlinks=((CWD / "AGENTS.md", CWD / "CLAUDE.md"),),
-        env=claude_memory_env,
+        env=(
+            {}
+            if JJ_DEFAULT_WS_ROOT is None
+            # internal and undocumented override, keying Claude's per-project memory on the jj
+            # default workspace so it is shared across workspaces
+            else {
+                "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": str(
+                    HOME
+                    / ".claude/projects"
+                    / claude_project_slug(JJ_DEFAULT_WS_ROOT)
+                    / "memory"
+                )
+            }
+        ),
     ),
     "codex": AgentSpec(
         agents_md=HOME / ".codex/AGENTS.md",
@@ -728,7 +711,14 @@ AGENTS: dict[str, AgentSpec] = {
             ),
             Mount(XDG_CONFIG_HOME / "codex", MountKind.BIND_RW, HOME / ".codex"),
         ),
-        files=codex_files,
+        files={
+            # trust the launch directory to avoid codex's confirmation prompt; codex merges this
+            # system layer under the user config, so the entry lands in a file codex never writes
+            # to, leaving its own config writable
+            Path("/etc/codex/config.toml"): File(
+                f'[projects."{CWD}"]\ntrust_level = "trusted"\n'.encode()
+            )
+        },
     ),
     "pi": AgentSpec(
         agents_md=HOME / ".pi/agent/AGENTS.md",
@@ -741,7 +731,8 @@ AGENTS: dict[str, AgentSpec] = {
             Mount(XDG_CONFIG_HOME / "pi", MountKind.BIND_RW, HOME / ".pi"),
             Mount(HOME / ".local/libexec/pi", MountKind.BIND_RO),
         ),
-        files=pi_files,
+        # keep pi's extension modules in its own state dir
+        files={HOME / ".npmrc": File(f"prefix={HOME / '.pi/agent/npm'}\n".encode())},
         provision_always=(Path("/usr/bin/pi"), HOME / ".local/libexec/pi/pi"),
     ),
 }
@@ -870,8 +861,7 @@ if __name__ == "__main__":
                     dir_mounts=dir_mounts,
                 )
             )
-        if spec.files is not None:
-            files |= spec.files()
+        files |= spec.files
     for path, file in files.items():
         fd = memfd_data(file.data)
         # bwrap defaults --ro-bind-data to mode 0600, so only override for executables
@@ -885,7 +875,6 @@ if __name__ == "__main__":
             bwrap_args += ["--symlink", str(target), str(link)]
 
     # env
-    agent_env = entry.env() if entry.env is not None else {}
     forwarded = {
         env_k: os.environ[env_k]
         for env_k in ENV_FORWARD
@@ -894,7 +883,7 @@ if __name__ == "__main__":
     }
     bwrap_args.append("--clearenv")
     # forwarded last: a host value overrides what the sandbox sets for the same variable
-    for env_k, env_v in (ENV_SET | PROXY_ENV | agent_env | forwarded).items():
+    for env_k, env_v in (ENV_SET | PROXY_ENV | entry.env | forwarded).items():
         bwrap_args += ["--setenv", env_k, env_v]
 
     bwrap_args += [

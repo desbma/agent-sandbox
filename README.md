@@ -42,6 +42,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
   - cache directories used for development (`cargo`, `uv`...) are mounted as OverlayFS: the agent inherits the host's content (major speedup), but the changes it makes are not reflected on the host
   - project build directories (Rust `target/`, Python `.venv`) are mounted as OverlayFS as well: reusing the artifacts already built on the host avoids full rebuilds, which can save minutes on big projects
 - Provides an exchange directory for sharing files that don't belong in the repository
+- Scratch mode when the launch directory is under `/tmp`: no exchange directory is set up, and each agent's session history (Claude Code projects, Codex sessions, etc.) is mounted on a tmpfs, so a throwaway task leaves no transcript on the host
 - [Jujutsu](https://jj-vcs.github.io/jj/) aware:
   - `jj` is wrapped to always run with `--ignore-working-copy`, which keeps it usable despite the read-only `.jj` directory
   - the default workspace's VCS directories are exposed alongside the current one, so commands still work from a secondary workspace

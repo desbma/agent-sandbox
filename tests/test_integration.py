@@ -116,6 +116,9 @@ class SandboxTestCase(unittest.TestCase):
                 dir=os.environ.get("XDG_RUNTIME_DIR") or Path.home(),
             )
         ).resolve()
+        assert not root.is_relative_to("/tmp"), (
+            f"integration fixture must live outside /tmp, got {root}"
+        )
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         self.fixture = SandboxFixture.create(root)
         for directory in (
@@ -929,6 +932,137 @@ class AgentSpecificTests(SandboxTestCase):
         self.assertTrue((self.fixture.config_home / "claude").is_dir())
         self.assertTrue((self.fixture.config_home / "claude/claude.json").exists())
         self.assertTrue((self.fixture.cache_home / "agent-microvm").is_dir())
+
+
+class ScratchModeTests(SandboxTestCase):
+    """Test the throwaway sandbox built for a launch directory under /tmp."""
+
+    def setUp(self) -> None:
+        """Add a project under /tmp and a host session history for the claude agent."""
+        super().setUp()
+        self.tmp_project = Path(tempfile.mkdtemp(dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp_project, ignore_errors=True)
+        self.host_sessions = self.fixture.config_home / "claude/projects"
+        self.sandbox_sessions = self.fixture.home / ".claude/projects"
+
+    def session_dirs(self) -> dict[str, tuple[Path, Path]]:
+        """Map each supported agent to its host and sandbox session directories."""
+        return {
+            "amp": (
+                self.fixture.data_home / "amp/threads",
+                self.fixture.home / ".local/share/amp/threads",
+            ),
+            "claude": (self.host_sessions, self.sandbox_sessions),
+            "codex": (
+                self.fixture.config_home / "codex/sessions",
+                self.fixture.home / ".codex/sessions",
+            ),
+            "pi": (
+                self.fixture.config_home / "pi/agent/sessions",
+                self.fixture.home / ".pi/agent/sessions",
+            ),
+        }
+
+    def plant_host_session(self, host_dir: Path) -> None:
+        """Write a session history entry in the host directory the agent reads from."""
+        # an earlier launch may have left the dir behind as an empty tmpfs mount point
+        host_dir.mkdir(parents=True, exist_ok=True)
+        (host_dir / "old.jsonl").write_text("host session")
+
+    def session_ops(self, sandbox_dir: Path) -> list[Op]:
+        """Return the ops listing the agent's session dir and writing an entry to it."""
+        return [
+            Op("entries", OpKind.LISTDIR, sandbox_dir),
+            Op("write", OpKind.WRITE, sandbox_dir / "new.jsonl"),
+        ]
+
+    def test_session_dir_hides_host_history_and_discards_writes(self) -> None:
+        """Empty the agent's session dir and keep its writes off the host."""
+        for agent, (host_dir, sandbox_dir) in self.session_dirs().items():
+            with self.subTest(agent=agent):
+                self.plant_host_session(host_dir)
+
+                report = self.run_probe(
+                    self.session_ops(sandbox_dir), agent=agent, cwd=self.tmp_project
+                )
+
+                self.assertEqual(report["entries"], [])
+                self.assertEqual(report["write"], "ok")
+                self.assertEqual([p.name for p in host_dir.iterdir()], ["old.jsonl"])
+
+    def test_session_dir_mounted_when_absent_from_host(self) -> None:
+        """Mount the session tmpfs even when the host has no session dir yet."""
+        report = self.run_probe(
+            self.session_ops(self.sandbox_sessions),
+            agent="claude",
+            cwd=self.tmp_project,
+        )
+
+        self.assertEqual(report["entries"], [])
+        self.assertEqual(report["write"], "ok")
+        # bwrap creates the mount point in the bind-mounted host config dir; it stays
+        # empty, as the sandbox writes land on the tmpfs mounted over it
+        self.assertTrue(self.host_sessions.is_dir())
+        self.assertEqual(list(self.host_sessions.iterdir()), [])
+
+    def test_extra_agent_session_dir_isolated(self) -> None:
+        """Hide the session history of an always-provisioned extra agent too."""
+        pi = self.fixture.home / ".local/libexec/pi/pi"
+        pi.parent.mkdir(parents=True)
+        pi.write_text(EXECUTABLE_STUB)
+        pi.chmod(0o755)
+        host_dir, sandbox_dir = self.session_dirs()["pi"]
+        self.plant_host_session(host_dir)
+
+        report = self.run_probe(
+            self.session_ops(sandbox_dir), agent="claude", cwd=self.tmp_project
+        )
+
+        self.assertEqual(report["entries"], [])
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual([p.name for p in host_dir.iterdir()], ["old.jsonl"])
+
+    def test_session_dir_advertised_as_tmpfs(self) -> None:
+        """List the session dir among the tmpfs mounts of the generated instructions."""
+        report = self.run_probe(
+            [Op("claude_md", OpKind.READ, self.fixture.home / ".claude/CLAUDE.md")],
+            agent="claude",
+            cwd=self.tmp_project,
+        )
+
+        lines = self.report_str(report, "claude_md").splitlines()
+        tmpfs_line = next(line for line in lines if "tmpfs filesystems" in line)
+        self.assertIn(f"`{self.sandbox_sessions}`", tmpfs_line)
+
+    def test_project_dir_stays_host_backed(self) -> None:
+        """Keep the launch dir readable and its writes on the host under the /tmp tmpfs."""
+        (self.tmp_project / "input.txt").write_text("host input")
+
+        report = self.run_probe(
+            [
+                Op("input", OpKind.READ, self.tmp_project / "input.txt"),
+                Op("write", OpKind.WRITE, self.tmp_project / "output.txt"),
+            ],
+            agent="claude",
+            cwd=self.tmp_project,
+        )
+
+        self.assertEqual(report["input"], "host input")
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual((self.tmp_project / "output.txt").read_text(), "canary")
+
+    def test_session_dir_persists_outside_tmp(self) -> None:
+        """Keep the session dir bound to the host for a project outside /tmp."""
+        self.plant_host_session(self.host_sessions)
+
+        report = self.run_probe(self.session_ops(self.sandbox_sessions), agent="claude")
+
+        self.assertEqual(report["entries"], ["old.jsonl"])
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual(
+            sorted(p.name for p in self.host_sessions.iterdir()),
+            ["new.jsonl", "old.jsonl"],
+        )
 
 
 class LaunchPolicyTests(SandboxTestCase):

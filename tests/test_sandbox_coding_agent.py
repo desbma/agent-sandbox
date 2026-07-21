@@ -99,6 +99,14 @@ class TempDirTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, path, ignore_errors=True)
         return path
 
+    def make_persistent_temp_dir(self) -> Path:
+        """Create a self-cleaning temporary directory outside /tmp, where scratch mode is off."""
+        path = Path(
+            tempfile.mkdtemp(dir=os.environ.get("XDG_RUNTIME_DIR") or Path.home())
+        ).resolve()
+        self.addCleanup(shutil.rmtree, path, ignore_errors=True)
+        return path
+
     def make_executable(self, path: Path) -> Path:
         """Create an executable file at path and return it."""
         path.write_text("")
@@ -190,11 +198,17 @@ class MountTests(unittest.TestCase):
 class MountKindTests(unittest.TestCase):
     """Test the mount kind specifications."""
 
-    def test_only_bind_rw_creates_a_missing_source(self) -> None:
-        """Create a missing source directory only for read-write binds."""
-        creating = {kind for kind in launcher.MountKind if kind.spec.create_missing}
-
-        self.assertEqual(creating, {launcher.MountKind.BIND_RW})
+    def test_source_pre_checks(self) -> None:
+        """Check the host source of every kind consuming one, creating it for read-write binds."""
+        self.assertEqual(
+            {kind: kind.spec.source_pre_check for kind in launcher.MountKind},
+            {
+                launcher.MountKind.TMPFS: launcher.SourcePreCheck.NONE,
+                launcher.MountKind.OVERLAYFS: launcher.SourcePreCheck.DROP_IF_MISSING,
+                launcher.MountKind.BIND_RO: launcher.SourcePreCheck.DROP_IF_MISSING,
+                launcher.MountKind.BIND_RW: launcher.SourcePreCheck.MKDIR_IF_MISSING,
+            },
+        )
 
     def test_descriptions_are_ordered_for_display(self) -> None:
         """Describe the kinds from the most to the least isolated from the host."""
@@ -271,6 +285,42 @@ class AgentSpecsTests(unittest.TestCase):
         self.assertTrue(
             all(mount.kind is launcher.MountKind.BIND_RO for mount in skill_mounts)
         )
+
+
+class SessionTmpfsMountsTests(unittest.TestCase):
+    """Test the tmpfs mounts hiding agent session history in scratch mode."""
+
+    def test_session_dirs_of_known_agents(self) -> None:
+        """Point every supported agent at the directory holding its session history."""
+        self.assertEqual(
+            {name: spec.session_dir for name, spec in launcher.AGENTS.items()},
+            {
+                "amp": FAKE_HOME / ".local/share/amp/threads",
+                "claude": FAKE_HOME / ".claude/projects",
+                "codex": FAKE_HOME / ".codex/sessions",
+                "pi": FAKE_HOME / ".pi/agent/sessions",
+            },
+        )
+
+    def test_covers_each_session_dir(self) -> None:
+        """Mount a tmpfs over the session dir of every given agent."""
+        specs = [launcher.AGENTS["claude"], launcher.AGENTS["codex"]]
+
+        mounts = launcher.session_tmpfs_mounts(specs)
+
+        self.assertEqual(
+            mounts,
+            [
+                launcher.Mount(
+                    FAKE_HOME / ".claude/projects", launcher.MountKind.TMPFS
+                ),
+                launcher.Mount(FAKE_HOME / ".codex/sessions", launcher.MountKind.TMPFS),
+            ],
+        )
+
+    def test_skips_agent_without_session_dir(self) -> None:
+        """Leave out an agent that declares no session dir."""
+        self.assertEqual(launcher.session_tmpfs_mounts([launcher.AgentSpec()]), [])
 
 
 class MemfdDataTests(unittest.TestCase):
@@ -1199,6 +1249,22 @@ class SharedWorkspaceRootTests(TempDirTestCase):
         self.assertEqual(launcher.shared_workspace_root(cwd, roots), cwd)
 
 
+class ScratchModeTests(TempDirTestCase):
+    """Test detection of a throwaway launch directory."""
+
+    def test_enabled_under_tmp(self) -> None:
+        """Enter scratch mode when the launch dir is under /tmp."""
+        module = load_launcher(cwd=self.make_temp_dir())
+
+        self.assertTrue(module.SCRATCH_MODE)
+
+    def test_disabled_outside_tmp(self) -> None:
+        """Stay out of scratch mode for a launch dir outside /tmp."""
+        module = load_launcher(cwd=self.make_persistent_temp_dir())
+
+        self.assertFalse(module.SCRATCH_MODE)
+
+
 class ExchangeDirPathTests(unittest.TestCase):
     """Test construction of the runtime exchange dir path."""
 
@@ -1217,14 +1283,6 @@ class ExchangeDirPathTests(unittest.TestCase):
         )
 
         self.assertEqual(path, Path("/run/user/1000/agent/projets-agentsandbox"))
-
-    def test_none_under_tmp(self) -> None:
-        """Build no exchange dir for an identity under /tmp."""
-        path = launcher.exchange_dir_path(
-            Path("/run/user/1000"), Path("/tmp/scratch/work")
-        )
-
-        self.assertIsNone(path)
 
 
 class ClaudePathHashTests(unittest.TestCase):

@@ -28,13 +28,25 @@ import sys
 from pathlib import Path
 
 
+class SourcePreCheck(enum.Enum):
+    """Check the launcher runs on a mount's host source path before invoking bwrap.
+
+    Covers the launcher side only, and says nothing of the mount points bwrap itself
+    creates in the sandbox.
+    """
+
+    NONE = enum.auto()
+    DROP_IF_MISSING = enum.auto()
+    MKDIR_IF_MISSING = enum.auto()
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class MountSpec:
-    """bwrap arguments, missing source policy and agent-facing description of a way to expose a host path."""
+    """bwrap arguments, source pre-check and agent-facing description of a way to expose a host path."""
 
     bwrap_args: tuple[str, ...]
     agent_description: str
-    create_missing: bool = False
+    source_pre_check: SourcePreCheck = SourcePreCheck.DROP_IF_MISSING
 
 
 class MountKind(enum.Enum):
@@ -43,6 +55,8 @@ class MountKind(enum.Enum):
     TMPFS = MountSpec(
         ("--perms", "0700", "--tmpfs", "{dst}"),
         "tmpfs filesystems (paths under these can not be accessed outside of the sandbox by the user, unless under a deeper mount point; they may also be cleared if the agent is restarted)",
+        # a tmpfs draws from no host path: its src field only carries the target
+        SourcePreCheck.NONE,
     )
     OVERLAYFS = MountSpec(
         ("--dir", "{dst}", "--overlay-src", "{src}", "--tmp-overlay", "{dst}"),
@@ -55,7 +69,7 @@ class MountKind(enum.Enum):
     BIND_RW = MountSpec(
         ("--bind", "{src}", "{dst}"),
         "normal bind mounts (allowing writes, reflected outside of the sandbox)",
-        create_missing=True,
+        SourcePreCheck.MKDIR_IF_MISSING,
     )
 
     @property
@@ -101,6 +115,8 @@ class AgentSpec:
 
     # global instructions file, None when the agent does not read one from a known path
     agents_md: Path | None = None
+    # sandbox dir holding the agent's session history, None when it keeps none
+    session_dir: Path | None = None
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
@@ -231,10 +247,8 @@ def exchange_root(cwd: Path, repo_info: RepoInfo | None) -> Path:
     return repo_info.root
 
 
-def exchange_dir_path(runtime_dir: Path, identity: Path) -> Path | None:
-    """Build the runtime exchange dir path for an identity, or None when it is under /tmp."""
-    if identity.is_relative_to("/tmp"):
-        return None
+def exchange_dir_path(runtime_dir: Path, identity: Path) -> Path:
+    """Build the runtime exchange dir path for an identity."""
     slug = "-".join(p.lower() for p in identity.parts[-2:])
     return runtime_dir / "agent" / slug
 
@@ -245,6 +259,15 @@ def exchange_mounts(exchange_dir: Path | None) -> list[Mount]:
         return []
     exchange_dir.mkdir(parents=True, exist_ok=True)
     return [Mount(exchange_dir, MountKind.BIND_RW)]
+
+
+def session_tmpfs_mounts(specs: collections.abc.Iterable[AgentSpec]) -> list[Mount]:
+    """Return the mounts keeping the agents' session history out of the host."""
+    return [
+        Mount(spec.session_dir, MountKind.TMPFS)
+        for spec in specs
+        if spec.session_dir is not None
+    ]
 
 
 def vcs_dirs(cwd: Path, repo_info: RepoInfo | None) -> list[Path]:
@@ -526,6 +549,8 @@ REPO_INFO = query_repo_info(Path.cwd())
 JJ_DEFAULT_WS_ROOT = REPO_INFO.jj_default_ws_root if REPO_INFO is not None else None
 IN_JJ_WORKSPACE = REPO_INFO is not None and REPO_INFO.jj_workspace_roots is not None
 CWD = confirm_cwd(REPO_INFO)
+# throwaway launch dir: no exchange dir, and no session history kept
+SCRATCH_MODE = CWD.is_relative_to("/tmp")
 XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache"))
 XDG_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
@@ -666,6 +691,7 @@ HOME_TOOLS = [
 AGENTS: dict[str, AgentSpec] = {
     "amp": AgentSpec(
         agents_md=HOME / ".config/amp/AGENTS.md",
+        session_dir=HOME / ".local/share/amp/threads",
         mounts=(
             Mount(XDG_CACHE_HOME / "amp", MountKind.BIND_RW, HOME / ".amp"),
             Mount(
@@ -679,6 +705,7 @@ AGENTS: dict[str, AgentSpec] = {
     ),
     "claude": AgentSpec(
         agents_md=HOME / ".claude/CLAUDE.md",
+        session_dir=HOME / ".claude/projects",
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -711,6 +738,7 @@ AGENTS: dict[str, AgentSpec] = {
     ),
     "codex": AgentSpec(
         agents_md=HOME / ".codex/AGENTS.md",
+        session_dir=HOME / ".codex/sessions",
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -730,6 +758,7 @@ AGENTS: dict[str, AgentSpec] = {
     ),
     "pi": AgentSpec(
         agents_md=HOME / ".pi/agent/AGENTS.md",
+        session_dir=HOME / ".pi/agent/sessions",
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -827,7 +856,11 @@ if __name__ == "__main__":
     agents = {AGENT: entry} | {name: AGENTS[name] for name in extras}
 
     # exchange dir in /run, shared across a jj repo's workspaces
-    exchange_dir = exchange_dir_path(XDG_RUNTIME_DIR, exchange_root(CWD, REPO_INFO))
+    exchange_dir = (
+        None
+        if SCRATCH_MODE
+        else exchange_dir_path(XDG_RUNTIME_DIR, exchange_root(CWD, REPO_INFO))
+    )
 
     # static mounts plus every conditional one, deduplicated and ordered for bwrap
     mounts = resolve_mounts(
@@ -836,6 +869,7 @@ if __name__ == "__main__":
             *(mount for spec in agents.values() for mount in spec.mounts),
             *agent_binary_mounts(agents, extras),
             *exchange_mounts(exchange_dir),
+            *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),
             *tool_mounts(),
             *cargo_target_mounts(),
             *UNJAIL_MOUNTS,
@@ -846,13 +880,15 @@ if __name__ == "__main__":
 
     dir_mounts: dict[MountKind, list[Path]] = collections.defaultdict(list)
     for mount in mounts:
-        if not mount.src.exists():  # NB: may exist as a file
-            if not mount.kind.spec.create_missing:
-                continue
+        pre_check = mount.kind.spec.source_pre_check
+        # NB: an existing source may be a file
+        if (pre_check is SourcePreCheck.DROP_IF_MISSING) and not mount.src.exists():
+            continue
+        if (pre_check is SourcePreCheck.MKDIR_IF_MISSING) and not mount.src.exists():
             # needed for agent dirs on first launch
             mount.src.mkdir()
         bwrap_args += mount.bwrap_args
-        if mount.src.is_dir():
+        if (mount.kind is MountKind.TMPFS) or mount.src.is_dir():
             dir_mounts[mount.kind].append(mount.target)
 
     # generated files

@@ -681,6 +681,8 @@ HOME_TOOLS = [
     "d2",
     "fd",
     "jj",
+    "mdcat",
+    "oxipng",
     "ruff",
     "rumdl",
     "ty",

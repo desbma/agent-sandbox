@@ -1006,7 +1006,7 @@ def host_dns_server() -> str | None:
     return None
 
 
-def build_run_microvm_config(  # noqa: PLR0913
+def build_run_microvm_config(  # noqa: PLR0913, PLR0917
     artifacts: GuestArtifacts,
     workspace_path: Path,
     runtime_paths: RuntimePaths,

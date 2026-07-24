@@ -7,6 +7,7 @@ select = ["ALL"]
 ignore = [
     "C401",     # unnecessary-generator-set
     "COM812",   # missing-trailing-comma
+    "CPY",      # flake8-copyright
     "D203",     # incorrect-blank-line-before-class
     "D213",     # multi-line-summary-second-line
     "E501",     # line-too-long

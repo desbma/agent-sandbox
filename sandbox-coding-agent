@@ -353,6 +353,27 @@ def claude_project_slug(path: Path) -> str:
     return f"{slug[:CLAUDE_SLUG_MAX_LEN]}-{claude_path_hash(str(path))}"
 
 
+def claude_md_symlinks(cwd: Path) -> tuple[tuple[Path, Path], ...]:
+    """Return the AGENTS.md to CLAUDE.md link pairs of cwd and its subdirectories."""
+    dirs = [cwd]
+    level = [cwd]
+    for _ in range(CLAUDE_MD_MAX_DEPTH):
+        # a symlinked dir resolves elsewhere in the sandbox, where the link cannot be created
+        level = [
+            child
+            for d in level
+            for child in d.iterdir()
+            if child.is_dir(follow_symlinks=False)
+        ]
+        dirs += level
+    pairs = ((d / "AGENTS.md", d / "CLAUDE.md") for d in dirs)
+    return tuple(
+        (agents_md, claude_md)
+        for agents_md, claude_md in pairs
+        if agents_md.is_file() and not claude_md.exists(follow_symlinks=False)
+    )
+
+
 def fatal_error(msg: str) -> None:
     """Show an error message and exit."""
     sys.stderr.write(f"{Path(__file__).name}: {msg}\n")
@@ -593,6 +614,9 @@ UNJAIL_MOUNTS: list[Mount] = (
 BASE36_DIGITS = string.digits + string.ascii_lowercase
 CLAUDE_SLUG_MAX_LEN = 200
 
+# deepest subdirectory level searched for an AGENTS.md to expose as CLAUDE.md
+CLAUDE_MD_MAX_DEPTH = 2
+
 # maximum levels the shared exchange dir may sit above a workspace root before sharing is dropped
 EXCHANGE_MAX_PREFIX_DEPTH_DELTA = 2
 
@@ -723,7 +747,8 @@ AGENTS: dict[str, AgentSpec] = {
             ),
             Mount(Path("/opt/claude-code"), MountKind.BIND_RO),
         ),
-        symlinks=((CWD / "AGENTS.md", CWD / "CLAUDE.md"),),
+        # the dict is built whatever the launched agent is, but only its own symlinks are used
+        symlinks=claude_md_symlinks(CWD) if AGENT == "claude" else (),
         env=(
             {}
             if JJ_DEFAULT_WS_ROOT is None

@@ -60,7 +60,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 ### Requirements
 
 - [Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
-- Python 3
+- Python 3.13+
 
 ### Usage
 

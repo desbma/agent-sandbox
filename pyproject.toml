@@ -21,5 +21,8 @@ ignore = [
     "UP022",    # replace-stdout-stderr
 ]
 
+[tool.ty.environment]
+python-version = "3.13"
+
 [tool.ty.src]
 include = ["agent-microvm", "agent-microvm/agent-microvm", "agent-proxy/agent-proxy", "sandbox-coding-agent", "tests"]

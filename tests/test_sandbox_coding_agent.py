@@ -30,11 +30,11 @@ IMPORT_CWD = FIXTURE_ROOT / "cwd"
 def load_launcher(
     env_overrides: dict[str, str | None] | None = None,
     cwd: Path | None = None,
+    agent: str = "claude",
 ) -> types.ModuleType:
-    """Load the launcher script as a module under a controlled environment.
+    """Load the launcher script as a module under a controlled environment, directory and agent.
 
-    A None value in env_overrides removes that variable from the environment. The module reads
-    its launch directory at import, so cwd selects the one it resolves its repo layout from.
+    A None value in env_overrides removes that variable from the environment.
     """
     for directory in (FAKE_HOME, FAKE_CONFIG_HOME, FAKE_RUNTIME_DIR, IMPORT_CWD):
         directory.mkdir(parents=True, exist_ok=True)
@@ -66,7 +66,7 @@ def load_launcher(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        sys.argv = [str(SCRIPT_PATH), "claude"]
+        sys.argv = [str(SCRIPT_PATH), agent]
         os.chdir(cwd if cwd is not None else IMPORT_CWD)
         loader.exec_module(module)
     finally:
@@ -1323,6 +1323,97 @@ class ClaudeProjectSlugTests(unittest.TestCase):
         self.assertEqual(len(slug), launcher.CLAUDE_SLUG_MAX_LEN + len("-fn0i87"))
         self.assertTrue(slug.startswith("-srv-nested-nested-"))
         self.assertTrue(slug.endswith("-fn0i87"))
+
+
+class ClaudeMdSymlinksTests(TempDirTestCase):
+    """Test the CLAUDE.md link pairs derived from the project's AGENTS.md files."""
+
+    def make_agents_md(self, root: Path, relative: str) -> Path:
+        """Create an AGENTS.md in a subdirectory of root, creating parents, and return it."""
+        agents_md = root / relative / "AGENTS.md"
+        agents_md.parent.mkdir(parents=True, exist_ok=True)
+        agents_md.write_text("instructions")
+        return agents_md
+
+    def test_agents_md_through_max_depth(self) -> None:
+        """Pair every AGENTS.md down to the maximum depth, and none below it."""
+        cwd = self.make_temp_dir()
+        paired = [
+            self.make_agents_md(cwd, "."),
+            self.make_agents_md(cwd, "docs"),
+            self.make_agents_md(cwd, "src/lib"),
+        ]
+        self.make_agents_md(cwd, "src/lib/inner")
+
+        self.assertEqual(
+            dict(launcher.claude_md_symlinks(cwd)),
+            {agents_md: agents_md.with_name("CLAUDE.md") for agents_md in paired},
+        )
+
+    def test_no_agents_md(self) -> None:
+        """Pair nothing when the project holds no AGENTS.md."""
+        cwd = self.make_temp_dir()
+        (cwd / "docs").mkdir()
+
+        self.assertEqual(launcher.claude_md_symlinks(cwd), ())
+
+    def test_agents_md_path_types(self) -> None:
+        """Pair a symlinked AGENTS.md file, and no path that is not a file."""
+        cwd = self.make_temp_dir()
+        (cwd / "instructions.md").write_text("instructions")
+        linked = cwd / "linked/AGENTS.md"
+        linked.parent.mkdir()
+        linked.symlink_to("../instructions.md")
+        (cwd / "directory/AGENTS.md").mkdir(parents=True)
+
+        self.assertEqual(
+            launcher.claude_md_symlinks(cwd),
+            ((linked, linked.with_name("CLAUDE.md")),),
+        )
+
+    def test_existing_claude_md(self) -> None:
+        """Skip only the directory already holding a CLAUDE.md, down to a dangling symlink."""
+        cwd = self.make_temp_dir()
+        self.make_agents_md(cwd, "docs")
+        nested = self.make_agents_md(cwd, "docs/api")
+        (cwd / "docs/CLAUDE.md").symlink_to(cwd / "docs/gone.md")
+
+        self.assertEqual(
+            launcher.claude_md_symlinks(cwd),
+            ((nested, nested.with_name("CLAUDE.md")),),
+        )
+
+    def test_symlinked_dirs(self) -> None:
+        """Skip symlinked subdirectories, whose links bwrap cannot create."""
+        cwd = self.make_temp_dir()
+        launch_dir_md = self.make_agents_md(cwd, ".")
+        outside = self.make_agents_md(self.make_temp_dir(), "shared")
+        (cwd / "linked").symlink_to(outside.parent)
+        (cwd / "self").symlink_to(cwd)
+
+        self.assertEqual(
+            launcher.claude_md_symlinks(cwd), ((launch_dir_md, cwd / "CLAUDE.md"),)
+        )
+
+    def test_spec_uses_launch_dir(self) -> None:
+        """Derive the claude spec symlinks from the launch directory."""
+        cwd = self.make_temp_dir()
+        agents_md = self.make_agents_md(cwd, "docs")
+
+        module = load_launcher(cwd=cwd)
+
+        self.assertEqual(
+            module.AGENTS["claude"].symlinks, ((agents_md, cwd / "docs/CLAUDE.md"),)
+        )
+
+    def test_spec_of_another_entry_agent(self) -> None:
+        """Leave the claude spec symlinks empty when another agent is launched."""
+        cwd = self.make_temp_dir()
+        self.make_agents_md(cwd, ".")
+
+        module = load_launcher(cwd=cwd, agent="codex")
+
+        self.assertEqual(module.AGENTS["claude"].symlinks, ())
 
 
 class ConfirmCwdTests(TempDirTestCase):

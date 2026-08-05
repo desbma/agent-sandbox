@@ -798,6 +798,30 @@ class AgentSpecificTests(SandboxTestCase):
         # the symlink is created on the bind-mounted project, so it persists
         self.assertTrue((self.fixture.project_dir / "CLAUDE.md").is_symlink())
 
+    def test_claude_md_symlink_created_for_nested_agents_md(self) -> None:
+        """Symlink CLAUDE.md beside a nested AGENTS.md, down to the maximum depth."""
+        docs = self.fixture.project_dir / "docs"
+        deep = self.fixture.project_dir / "src/lib/inner"
+        deep.mkdir(parents=True)
+        docs.mkdir()
+        (docs / "AGENTS.md").write_text("docs instructions")
+        (deep / "AGENTS.md").write_text("deep instructions")
+
+        report = self.run_probe(
+            [
+                Op("is_link", OpKind.ISLINK, docs / "CLAUDE.md"),
+                Op("target", OpKind.READLINK, docs / "CLAUDE.md"),
+                Op("content", OpKind.READ, docs / "CLAUDE.md"),
+                Op("deep_exists", OpKind.LEXISTS, deep / "CLAUDE.md"),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(report["is_link"], True)
+        self.assertEqual(report["target"], str(docs / "AGENTS.md"))
+        self.assertEqual(report["content"], "docs instructions")
+        self.assertEqual(report["deep_exists"], False)
+
     def test_no_claude_md_symlink_without_agents_md(self) -> None:
         """Create no CLAUDE.md symlink when the project has no AGENTS.md."""
         report = self.run_probe(

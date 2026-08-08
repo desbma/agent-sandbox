@@ -779,6 +779,93 @@ class AgentSpecificTests(SandboxTestCase):
             (self.fixture.config_home / "claude/state.txt").read_text(), "canary"
         )
 
+    def test_auth_profile_swaps_credentials(self) -> None:
+        """Expose the selected profile's empty credentials, leaving the default ones alone."""
+        credentials = self.fixture.config_home / "claude/.credentials.json"
+        credentials.write_text('{"token": "default"}')
+        sandbox_credentials = self.fixture.home / ".claude/.credentials.json"
+
+        report = self.run_probe(
+            [
+                Op("credentials", OpKind.READ, sandbox_credentials),
+                Op("login", OpKind.WRITE, sandbox_credentials),
+            ],
+            agent="claude",
+            extra_env={"SANDBOX_AGENT_CLAUDE_AUTH": "pro"},
+        )
+
+        self.assertEqual(report["credentials"], "{}")
+        self.assertEqual(report["login"], "ok")
+        # the agent's credentials writes reach the profile file only
+        self.assertEqual(
+            (self.fixture.config_home / "claude/.credentials-pro.json").read_text(),
+            "canary",
+        )
+        self.assertEqual(credentials.read_text(), '{"token": "default"}')
+
+    def test_default_credentials_stay_unmounted(self) -> None:
+        """Expose the default credentials through the config directory only."""
+        credentials = self.fixture.config_home / "claude/.credentials.json"
+        credentials.write_text('{"token": "default"}')
+        sandbox_credentials = self.fixture.home / ".claude/.credentials.json"
+
+        report = self.run_probe(
+            [Op("atomic_refresh", OpKind.RENAME_OVER, sandbox_credentials)],
+            agent="claude",
+        )
+
+        # a host side refresh replaces this file, which a mount over it would answer with EBUSY
+        self.assertEqual(report["atomic_refresh"], "ok")
+        self.assertEqual(credentials.read_text(), "canary")
+
+    def test_auth_profile_creates_missing_agent_config(self) -> None:
+        """Create the config directory and credentials of a profile of an unconfigured agent."""
+        report = self.run_probe(
+            [
+                Op(
+                    "credentials",
+                    OpKind.READ,
+                    self.fixture.home / ".pi/agent/auth.json",
+                ),
+                Op("login", OpKind.WRITE, self.fixture.home / ".pi/agent/auth.json"),
+            ],
+            agent="pi",
+            extra_env={"SANDBOX_AGENT_PI_AUTH": "perso"},
+        )
+
+        self.assertEqual(report["credentials"], "{}")
+        self.assertEqual(report["login"], "ok")
+        self.assertEqual(
+            (self.fixture.config_home / "pi/agent/auth-perso.json").read_text(),
+            "canary",
+        )
+
+    def test_auth_profile_applies_to_extra_agent(self) -> None:
+        """Select the profile credentials of an always-provisioned extra agent."""
+        pi = self.fixture.home / ".local/libexec/pi/pi"
+        pi.parent.mkdir(parents=True)
+        pi.write_text(EXECUTABLE_STUB)
+        pi.chmod(0o755)
+        credentials = self.fixture.config_home / "pi/agent/auth.json"
+        credentials.parent.mkdir(parents=True)
+        credentials.write_text('{"token": "default"}')
+
+        report = self.run_probe(
+            [
+                Op(
+                    "credentials",
+                    OpKind.READ,
+                    self.fixture.home / ".pi/agent/auth.json",
+                )
+            ],
+            agent="claude",
+            extra_env={"SANDBOX_AGENT_PI_AUTH": "work"},
+        )
+
+        self.assertEqual(report["credentials"], "{}")
+        self.assertEqual((credentials.parent / "auth-work.json").read_text(), "{}")
+        self.assertEqual(credentials.read_text(), '{"token": "default"}')
+
     def test_claude_md_symlink_created_for_agents_md(self) -> None:
         """Symlink CLAUDE.md to an existing AGENTS.md in the project."""
         (self.fixture.project_dir / "AGENTS.md").write_text("project instructions")

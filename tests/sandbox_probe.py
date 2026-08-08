@@ -27,8 +27,16 @@ class OpKind(enum.Enum):
     MODE = enum.auto()
     LISTDIR = enum.auto()
     WRITE = enum.auto()
+    RENAME_OVER = enum.auto()
     ENV = enum.auto()
     CWD = enum.auto()
+
+
+def errno_name(exc: OSError) -> str:
+    """Return the errno name of an OS error, or its message when it carries none."""
+    if exc.errno is None:
+        return str(exc)
+    return errno.errorcode.get(exc.errno, str(exc))
 
 
 def attempt_write(path: str) -> str:
@@ -36,9 +44,20 @@ def attempt_write(path: str) -> str:
     try:
         Path(path).write_text("canary")
     except OSError as exc:
-        if exc.errno is None:
-            return str(exc)
-        return errno.errorcode.get(exc.errno, str(exc))
+        return errno_name(exc)
+    return "ok"
+
+
+def attempt_rename_over(path: str) -> str:
+    """Try to replace path with a temporary file, returning "ok" or the errno name."""
+    target = Path(path)
+    tmp = target.with_name(f"{target.name}.tmp")
+    tmp.write_text("canary")
+    try:
+        tmp.replace(target)
+    except OSError as exc:
+        tmp.unlink()
+        return errno_name(exc)
     return "ok"
 
 
@@ -64,6 +83,7 @@ class Op:
         OpKind.MODE: lambda arg: oct(stat.S_IMODE(Path(arg).lstat().st_mode)),
         OpKind.LISTDIR: lambda arg: sorted(p.name for p in Path(arg).iterdir()),
         OpKind.WRITE: attempt_write,
+        OpKind.RENAME_OVER: attempt_rename_over,
         OpKind.ENV: os.environ.get,
         OpKind.CWD: lambda _arg: str(Path.cwd()),
     }

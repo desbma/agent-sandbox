@@ -323,6 +323,148 @@ class SessionTmpfsMountsTests(unittest.TestCase):
         self.assertEqual(launcher.session_tmpfs_mounts([launcher.AgentSpec()]), [])
 
 
+class AuthProfileMountsTests(TempDirTestCase):
+    """Test the credentials mounts selecting an agent's auth profile."""
+
+    def setUp(self) -> None:
+        """Build an agent spec whose credentials live in a temporary config directory."""
+        config_dir = self.make_temp_dir()
+        self.credentials = config_dir / ".credentials.json"
+        self.profile = config_dir / ".credentials-pro.json"
+        self.sandbox_path = Path("/home/user/.claude/.credentials.json")
+        self.spec = launcher.AgentSpec(
+            credentials=launcher.Mount(
+                self.credentials, launcher.MountKind.BIND_RW, self.sandbox_path
+            )
+        )
+
+    def resolve(
+        self, agents: dict[str, launcher.AgentSpec], **profiles: str
+    ) -> list[launcher.Mount]:
+        """Resolve the auth profile mounts of agents, with only the given profiles selected."""
+        env = {
+            f"SANDBOX_AGENT_{name.upper()}_AUTH": profile
+            for name, profile in profiles.items()
+        }
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            return launcher.auth_profile_mounts(agents)
+
+    def claude_mount(self, src: Path) -> list[launcher.Mount]:
+        """Return the single mount exposing src at the claude credentials path."""
+        return [launcher.Mount(src, launcher.MountKind.BIND_RW, self.sandbox_path)]
+
+    def test_credentials_of_known_agents(self) -> None:
+        """Point every agent supporting auth profiles at its credentials file."""
+        self.assertEqual(
+            {name: spec.credentials for name, spec in launcher.AGENTS.items()},
+            {
+                "amp": None,
+                "claude": launcher.Mount(
+                    FAKE_CONFIG_HOME / "claude/.credentials.json",
+                    launcher.MountKind.BIND_RW,
+                    FAKE_HOME / ".claude/.credentials.json",
+                ),
+                "codex": launcher.Mount(
+                    FAKE_CONFIG_HOME / "codex/auth.json",
+                    launcher.MountKind.BIND_RW,
+                    FAKE_HOME / ".codex/auth.json",
+                ),
+                "pi": launcher.Mount(
+                    FAKE_CONFIG_HOME / "pi/agent/auth.json",
+                    launcher.MountKind.BIND_RW,
+                    FAKE_HOME / ".pi/agent/auth.json",
+                ),
+            },
+        )
+
+    def test_no_mount_without_selected_profile(self) -> None:
+        """Leave the agent's own credentials in place when no profile is selected."""
+        self.credentials.write_text('{"token": "default"}')
+
+        self.assertEqual(self.resolve({"claude": self.spec}), [])
+        self.assertFalse(self.profile.exists())
+
+    def test_seeds_new_profile_beside_default_credentials(self) -> None:
+        """Create empty credentials for a new profile, never copying the default ones."""
+        self.credentials.write_text('{"token": "default"}')
+
+        mounts = self.resolve({"claude": self.spec}, claude="pro")
+
+        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(self.profile.read_text(), "{}")
+        self.assertEqual(self.profile.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.credentials.read_text(), '{"token": "default"}')
+
+    def test_keeps_existing_profile_credentials(self) -> None:
+        """Select the credentials of an already used profile without modifying them."""
+        self.credentials.write_text('{"token": "default"}')
+        self.profile.write_text('{"token": "pro"}')
+
+        mounts = self.resolve({"claude": self.spec}, claude="pro")
+
+        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(self.profile.read_text(), '{"token": "pro"}')
+
+    def test_tolerates_a_concurrent_first_launch(self) -> None:
+        """Keep the credentials a launcher racing on the same new profile seeded first."""
+        self.credentials.write_text('{"token": "default"}')
+        self.profile.write_text('{"token": "pro"}')
+
+        # the racing launcher wins between this one's absence check and its own create
+        with unittest.mock.patch.object(Path, "exists", return_value=False):
+            mounts = self.resolve({"claude": self.spec}, claude="pro")
+
+        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(self.profile.read_text(), '{"token": "pro"}')
+
+    def test_seeds_new_profile_without_default_credentials(self) -> None:
+        """Create empty credentials for a new profile of an agent that is not logged in."""
+        mounts = self.resolve({"claude": self.spec}, claude="pro")
+
+        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(self.profile.read_text(), "{}")
+        self.assertEqual(self.profile.stat().st_mode & 0o777, 0o600)
+
+    def test_creates_missing_config_dir(self) -> None:
+        """Create the config directory of an agent that was never launched."""
+        credentials = self.make_temp_dir() / "codex/auth.json"
+        spec = launcher.AgentSpec(
+            credentials=launcher.Mount(credentials, launcher.MountKind.BIND_RW)
+        )
+
+        self.resolve({"codex": spec}, codex="pro")
+
+        self.assertEqual((credentials.parent / "auth-pro.json").read_text(), "{}")
+
+    def test_switches_each_agent_separately(self) -> None:
+        """Switch only the agents whose profile env var is set."""
+        self.credentials.write_text('{"token": "default"}')
+        other = self.make_temp_dir() / "auth.json"
+        other.write_text('{"token": "pi"}')
+        pi_spec = launcher.AgentSpec(
+            credentials=launcher.Mount(other, launcher.MountKind.BIND_RW)
+        )
+
+        mounts = self.resolve({"claude": self.spec, "pi": pi_spec}, pi="perso")
+
+        self.assertEqual(
+            mounts,
+            [
+                launcher.Mount(
+                    other.parent / "auth-perso.json", launcher.MountKind.BIND_RW
+                )
+            ],
+        )
+
+    def test_rejects_agent_without_credentials(self) -> None:
+        """Fail when a profile is selected for an agent that keeps no credentials file."""
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            self.resolve({"amp": launcher.AgentSpec()}, amp="pro")
+
+
 class MemfdDataTests(unittest.TestCase):
     """Test memfd creation."""
 

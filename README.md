@@ -50,6 +50,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 - Injects a small prompt to describe the sandbox to the agent, its directories and mount points, etc. It is appended to the agent's global instructions, built from `~/.config/agents/AGENTS.md` and, if present, the agent specific `~/.config/agents/AGENTS.<agent>.md` (ie. `AGENTS.claude.md`)
 - Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
 - Provisions the other installed agents alongside the one being launched, so it can spawn them as subagents, typically to get a review from a different model
+- Optional auth profiles, to run an agent under a second account without logging in and out: `SANDBOX_AGENT_CLAUDE_AUTH=<profile>` (likewise `SANDBOX_AGENT_CODEX_AUTH` and `SANDBOX_AGENT_PI_AUTH`) switches the agent's credentials to `~/.config/claude/.credentials-<profile>.json`, created empty on first use
 - Applies per-agent quality of life fixes: Codex CLI trusts the launch directory instead of prompting about it, Pi keeps its extension modules in its own state directory, etc.
 - Safeguards against accidental launches from the wrong directory: the home directory is rejected, and a repository subdirectory offers to switch to the repository root
 - Exposes `/dev/kvm` and the host CPU topology, so the agent can run nested VMs with a matching core layout and pinned vCPUs: this is what lets `agent-microvm` work from inside the sandbox

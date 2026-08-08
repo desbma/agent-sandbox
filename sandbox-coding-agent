@@ -25,6 +25,8 @@ import shutil
 import string
 import subprocess
 import sys
+import tempfile
+import typing
 from pathlib import Path
 
 
@@ -117,6 +119,8 @@ class AgentSpec:
     agents_md: Path | None = None
     # sandbox dir holding the agent's session history, None when it keeps none
     session_dir: Path | None = None
+    # credentials file mount, None for agents without auth profile support
+    credentials: Mount | None = None
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
@@ -270,6 +274,43 @@ def session_tmpfs_mounts(specs: collections.abc.Iterable[AgentSpec]) -> list[Mou
     ]
 
 
+def profile_credentials(credentials: Path, profile: str) -> Path:
+    """Return the credentials file of an auth profile, creating it empty when the profile is new."""
+    variant = credentials.with_stem(f"{credentials.stem}-{profile}")
+    if not variant.exists():
+        variant.parent.mkdir(parents=True, exist_ok=True)
+        # seeding from another profile would put one refresh token in two files, and the first
+        # rotation strands the one that did not refresh
+        with tempfile.NamedTemporaryFile("w", dir=variant.parent) as seed:
+            seed.write("{}")
+            seed.flush()
+            # a launcher racing on the same new profile either wins the link or keeps its own
+            # credentials, and never sees a half written file
+            with contextlib.suppress(FileExistsError):
+                variant.hardlink_to(seed.name)
+    return variant
+
+
+def auth_profile_mounts(
+    agents: collections.abc.Mapping[str, AgentSpec],
+) -> list[Mount]:
+    """Return the mounts pointing each agent at the credentials of the profile it selects."""
+    mounts = []
+    for name, spec in agents.items():
+        profile = os.environ.get(f"SANDBOX_AGENT_{name.upper()}_AUTH")
+        if profile is None:
+            continue
+        if spec.credentials is None:
+            fatal_error(f"Agent {name!r} does not support auth profiles")
+        mounts.append(
+            dataclasses.replace(
+                spec.credentials,
+                src=profile_credentials(spec.credentials.src, profile),
+            )
+        )
+    return mounts
+
+
 def vcs_dirs(cwd: Path, repo_info: RepoInfo | None) -> list[Path]:
     """Return the VCS dirs to expose: cwd's, plus the jj default workspace's."""
     # below a repo root, cwd has no VCS dir of its own, and the repo's stay hidden
@@ -374,7 +415,7 @@ def claude_md_symlinks(cwd: Path) -> tuple[tuple[Path, Path], ...]:
     )
 
 
-def fatal_error(msg: str) -> None:
+def fatal_error(msg: str) -> typing.NoReturn:
     """Show an error message and exit."""
     sys.stderr.write(f"{Path(__file__).name}: {msg}\n")
     sys.exit(1)
@@ -733,6 +774,11 @@ AGENTS: dict[str, AgentSpec] = {
     "claude": AgentSpec(
         agents_md=HOME / ".claude/CLAUDE.md",
         session_dir=HOME / ".claude/projects",
+        credentials=Mount(
+            XDG_CONFIG_HOME / "claude/.credentials.json",
+            MountKind.BIND_RW,
+            HOME / ".claude/.credentials.json",
+        ),
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -767,6 +813,11 @@ AGENTS: dict[str, AgentSpec] = {
     "codex": AgentSpec(
         agents_md=HOME / ".codex/AGENTS.md",
         session_dir=HOME / ".codex/sessions",
+        credentials=Mount(
+            XDG_CONFIG_HOME / "codex/auth.json",
+            MountKind.BIND_RW,
+            HOME / ".codex/auth.json",
+        ),
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -787,6 +838,11 @@ AGENTS: dict[str, AgentSpec] = {
     "pi": AgentSpec(
         agents_md=HOME / ".pi/agent/AGENTS.md",
         session_dir=HOME / ".pi/agent/sessions",
+        credentials=Mount(
+            XDG_CONFIG_HOME / "pi/agent/auth.json",
+            MountKind.BIND_RW,
+            HOME / ".pi/agent/auth.json",
+        ),
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -895,6 +951,7 @@ if __name__ == "__main__":
         [
             *MOUNTS,
             *(mount for spec in agents.values() for mount in spec.mounts),
+            *auth_profile_mounts(agents),
             *agent_binary_mounts(agents, extras),
             *exchange_mounts(exchange_dir),
             *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),

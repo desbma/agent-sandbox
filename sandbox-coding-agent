@@ -599,7 +599,7 @@ def resolve_extra_agents(entry: str) -> dict[str, Path]:
 
 
 AGENT = Path(sys.argv[1]).name
-DEBUG = "DEBUG_SANDBOX_AGENT" in os.environ
+DEBUG = "SANDBOX_AGENT_DEBUG" in os.environ
 
 # sandbox path holding generated shims, and the real jj that bypasses the jj shim placed there
 SANDBOX_BIN_DIR = Path("/run/bin")

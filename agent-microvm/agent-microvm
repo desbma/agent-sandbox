@@ -149,7 +149,7 @@ PREPARE_LOCK_FILENAME = "prepare.lock"
 SESSION_LOCK_FILENAME = "session.lock"
 PREPARE_RECIPE_VERSION = 6
 ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
-BOOT_TRACE_ENV_VAR = "BOOT_TRACE_SANDBOX_AGENT"
+BOOT_TRACE_ENV_VAR = "AGENT_MICROVM_BOOT_TRACE"
 HOST_TRACE_VIRTIOFSD_LAUNCHED = "host:virtiofsd-launched"
 HOST_TRACE_VIRTIOFSD_READY = "host:virtiofsd-ready"
 HOST_TRACE_QEMU_LAUNCHED = "host:qemu-launched"
@@ -331,7 +331,7 @@ def default_memory_mib() -> int:
 
 def debug_enabled() -> bool:
     """Return whether debug output is enabled."""
-    return "DEBUG_SANDBOX_AGENT" in os.environ
+    return "SANDBOX_AGENT_DEBUG" in os.environ
 
 
 def boot_trace_enabled() -> bool:
@@ -375,7 +375,7 @@ def report_boot_trace(trace: BootTrace, console_log_path: Path) -> None:
 
 
 def configure_logging() -> None:
-    """Send progress logs to stderr, verbose under DEBUG_SANDBOX_AGENT."""
+    """Send progress logs to stderr, verbose under SANDBOX_AGENT_DEBUG."""
     logging.basicConfig(
         level=logging.DEBUG if debug_enabled() else logging.INFO,
         stream=sys.stderr,

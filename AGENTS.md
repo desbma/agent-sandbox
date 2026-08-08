@@ -67,7 +67,7 @@ Design intent and constraints behind the `agent-microvm/agent-microvm` launcher 
 
 - **Session-bound, throwaway lifetime.** A VM lives exactly one foreground SSH session: it powers off when the session ends, and the launcher kills QEMU/virtiofsd when the `ssh` client exits (closed terminal, dropped link, or a signal received before `ssh` owns the tty). No orphaned VMs survive.
 - **Native SIGINT.** Ctrl-C inside the session must reach the foreground guest process, not kill the VM, so interactive programs can be interrupted without losing the session.
-- **Native terminal UX.** Correct `TERM`/terminfo/locale, a real controlling TTY, working Ctrl-C/Ctrl-Z/job control, dynamic resize propagation, and no visible boot noise unless `DEBUG_SANDBOX_AGENT` is set.
+- **Native terminal UX.** Correct `TERM`/terminfo/locale, a real controlling TTY, working Ctrl-C/Ctrl-Z/job control, dynamic resize propagation, and no visible boot noise unless `SANDBOX_AGENT_DEBUG` is set.
 - **Rejected alternatives.** The baseline is rootless QEMU `microvm` with SSH over passt TCP; virtio-serial SSH, TAP/bridge networking, and vsock were considered and rejected for this path.
 - **Bump `PREPARE_RECIPE_VERSION`** on any change to the guest init recipe or baked artifact contents, or existing caches keep running the old recipe.
 - **Self-pruning artifact cache.** Each launch deletes the cached directories of other Alpine versions, skipping any whose `flock` is held by a live build or session; kernel locks die with their holder, so a crash never leaves a directory permanently undeletable.

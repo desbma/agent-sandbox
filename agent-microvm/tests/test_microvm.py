@@ -1289,7 +1289,7 @@ class MicrovmCommandTests(unittest.TestCase):
 
     def test_verbose_subprocess_stdout_routes_to_stderr_under_debug(self) -> None:
         """Route chatty subprocess output to stderr when debugging is enabled."""
-        with unittest.mock.patch.dict(os.environ, {"DEBUG_SANDBOX_AGENT": "1"}):
+        with unittest.mock.patch.dict(os.environ, {"SANDBOX_AGENT_DEBUG": "1"}):
             self.assertEqual(
                 agent_microvm.verbose_subprocess_stdout(), sys.stderr.fileno()
             )
@@ -1312,7 +1312,7 @@ class MicrovmCommandTests(unittest.TestCase):
             )
 
             with (
-                unittest.mock.patch.dict(os.environ, {"DEBUG_SANDBOX_AGENT": "1"}),
+                unittest.mock.patch.dict(os.environ, {"SANDBOX_AGENT_DEBUG": "1"}),
                 unittest.mock.patch.object(
                     agent_microvm, "default_artifacts", return_value=artifacts
                 ),

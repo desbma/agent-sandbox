@@ -1231,7 +1231,7 @@ class LaunchPolicyTests(SandboxTestCase):
     def test_debug_mode_prints_bwrap_command(self) -> None:
         """Print the assembled bwrap command on stderr in debug mode."""
         result = self.run_launcher(
-            agent="claude", extra_env={"DEBUG_SANDBOX_AGENT": "1"}
+            agent="claude", extra_env={"SANDBOX_AGENT_DEBUG": "1"}
         )
 
         self.assertEqual(result.returncode, 0)

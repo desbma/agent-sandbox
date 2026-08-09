@@ -866,6 +866,39 @@ class AgentSpecificTests(SandboxTestCase):
         self.assertEqual((credentials.parent / "auth-work.json").read_text(), "{}")
         self.assertEqual(credentials.read_text(), '{"token": "default"}')
 
+    def test_auth_profile_of_codex_points_at_its_login_command(self) -> None:
+        """Report the codex login command while the selected profile holds no credentials."""
+        credentials = self.fixture.config_home / "codex/auth.json"
+        profile = self.fixture.config_home / "codex/auth-pro.json"
+        sandbox_credentials = self.fixture.home / ".codex/auth.json"
+
+        logged_out = self.run_launcher(
+            [
+                Op("credentials", OpKind.READ, sandbox_credentials),
+                Op("login", OpKind.WRITE, sandbox_credentials),
+            ],
+            agent="codex",
+            extra_env={"SANDBOX_AGENT_CODEX_AUTH": "pro"},
+        )
+
+        self.assertEqual(logged_out.returncode, 0)
+        self.assertIn("codex login", logged_out.stderr)
+        self.assertEqual(
+            json.loads(logged_out.stdout), {"credentials": "{}", "login": "ok"}
+        )
+        # the login the message asks for must reach the profile, not the default account
+        self.assertEqual(profile.read_text(), "canary")
+        # bwrap creates the missing mount point in the host config directory
+        self.assertEqual(credentials.read_text(), "")
+
+        profile.write_text('{"OPENAI_API_KEY": "fixture-api-key"}')
+        logged_in = self.run_launcher(
+            agent="codex", extra_env={"SANDBOX_AGENT_CODEX_AUTH": "pro"}
+        )
+
+        self.assertEqual(logged_in.returncode, 0)
+        self.assertNotIn("codex login", logged_in.stderr)
+
     def test_claude_md_symlink_created_for_agents_md(self) -> None:
         """Symlink CLAUDE.md to an existing AGENTS.md in the project."""
         (self.fixture.project_dir / "AGENTS.md").write_text("project instructions")

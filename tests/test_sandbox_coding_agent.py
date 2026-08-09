@@ -349,6 +349,15 @@ class AuthProfileMountsTests(TempDirTestCase):
         with unittest.mock.patch.dict(os.environ, env, clear=True):
             return launcher.auth_profile_mounts(agents)
 
+    def resolve_report(
+        self, agents: dict[str, launcher.AgentSpec], **profiles: str
+    ) -> str:
+        """Resolve the auth profile mounts of agents, returning what the launcher reported."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.resolve(agents, **profiles)
+        return stderr.getvalue()
+
     def claude_mount(self, src: Path) -> list[launcher.Mount]:
         """Return the single mount exposing src at the claude credentials path."""
         return [launcher.Mount(src, launcher.MountKind.BIND_RW, self.sandbox_path)]
@@ -463,6 +472,36 @@ class AuthProfileMountsTests(TempDirTestCase):
             self.assertRaises(SystemExit),
         ):
             self.resolve({"amp": launcher.AgentSpec()}, amp="pro")
+
+    def test_login_commands_of_known_agents(self) -> None:
+        """Name a login command for the agents that refuse to start on empty credentials."""
+        self.assertEqual(
+            {name: spec.auth_profile_login for name, spec in launcher.AGENTS.items()},
+            {"amp": None, "claude": None, "codex": "codex login", "pi": None},
+        )
+
+    def test_reports_a_profile_that_was_never_logged_into(self) -> None:
+        """Point at the agent's login command while the profile credentials stay empty."""
+        spec = dataclasses.replace(self.spec, auth_profile_login="codex login")
+
+        report = self.resolve_report({"codex": spec}, codex="pro")
+
+        # a login command missing the selector would overwrite the default credentials
+        self.assertIn("`SANDBOX_AGENT_CODEX_AUTH=pro codex login`", report)
+        # the seeding launch is not the only one to report it, the profile stays unusable until
+        # the login writes credentials
+        self.assertEqual(self.resolve_report({"codex": spec}, codex="pro"), report)
+
+    def test_reports_nothing_once_the_profile_is_logged_in(self) -> None:
+        """Stay quiet once the profile credentials hold a login."""
+        spec = dataclasses.replace(self.spec, auth_profile_login="codex login")
+        self.profile.write_text('{"token": "pro"}')
+
+        self.assertEqual(self.resolve_report({"codex": spec}, codex="pro"), "")
+
+    def test_reports_nothing_for_an_agent_starting_logged_out(self) -> None:
+        """Stay quiet for an agent whose own login flow handles empty credentials."""
+        self.assertEqual(self.resolve_report({"claude": self.spec}, claude="pro"), "")
 
 
 class MemfdDataTests(unittest.TestCase):

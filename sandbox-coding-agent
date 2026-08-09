@@ -121,6 +121,8 @@ class AgentSpec:
     session_dir: Path | None = None
     # credentials file mount, None for agents without auth profile support
     credentials: Mount | None = None
+    # command logging an auth profile in, None when the agent handles empty credentials itself
+    auth_profile_login: str | None = None
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
@@ -282,7 +284,7 @@ def profile_credentials(credentials: Path, profile: str) -> Path:
         # seeding from another profile would put one refresh token in two files, and the first
         # rotation strands the one that did not refresh
         with tempfile.NamedTemporaryFile("w", dir=variant.parent) as seed:
-            seed.write("{}")
+            seed.write(EMPTY_CREDENTIALS)
             seed.flush()
             # a launcher racing on the same new profile either wins the link or keeps its own
             # credentials, and never sees a half written file
@@ -294,20 +296,24 @@ def profile_credentials(credentials: Path, profile: str) -> Path:
 def auth_profile_mounts(
     agents: collections.abc.Mapping[str, AgentSpec],
 ) -> list[Mount]:
-    """Return the mounts pointing each agent at the credentials of the profile it selects."""
+    """Return each agent's selected profile mounts, reporting the profiles needing a login."""
     mounts = []
     for name, spec in agents.items():
-        profile = os.environ.get(f"SANDBOX_AGENT_{name.upper()}_AUTH")
+        profile_var = f"SANDBOX_AGENT_{name.upper()}_AUTH"
+        profile = os.environ.get(profile_var)
         if profile is None:
             continue
         if spec.credentials is None:
             fatal_error(f"Agent {name!r} does not support auth profiles")
-        mounts.append(
-            dataclasses.replace(
-                spec.credentials,
-                src=profile_credentials(spec.credentials.src, profile),
+        credentials = profile_credentials(spec.credentials.src, profile)
+        login = spec.auth_profile_login
+        if (login is not None) and (credentials.read_text() == EMPTY_CREDENTIALS):
+            # without the selector the login would land on the default credentials
+            show_message(
+                f"{name.title()} auth profile {profile!r} is empty, "
+                f"run `{profile_var}={shlex.quote(profile)} {login}`"
             )
-        )
+        mounts.append(dataclasses.replace(spec.credentials, src=credentials))
     return mounts
 
 
@@ -415,9 +421,14 @@ def claude_md_symlinks(cwd: Path) -> tuple[tuple[Path, Path], ...]:
     )
 
 
+def show_message(msg: str) -> None:
+    """Show a message prefixed with the launcher name."""
+    sys.stderr.write(f"{Path(__file__).name}: {msg}\n")
+
+
 def fatal_error(msg: str) -> typing.NoReturn:
     """Show an error message and exit."""
-    sys.stderr.write(f"{Path(__file__).name}: {msg}\n")
+    show_message(msg)
     sys.exit(1)
 
 
@@ -755,6 +766,9 @@ HOME_TOOLS = [
     "uvx",
 ]
 
+# credentials of an auth profile that was never logged into
+EMPTY_CREDENTIALS = "{}"
+
 # supported agents, and everything to provision them with
 AGENTS: dict[str, AgentSpec] = {
     "amp": AgentSpec(
@@ -818,6 +832,8 @@ AGENTS: dict[str, AgentSpec] = {
             MountKind.BIND_RW,
             HOME / ".codex/auth.json",
         ),
+        # codex rejects empty credentials instead of treating them as logged out
+        auth_profile_login="codex login",
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",

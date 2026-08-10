@@ -152,7 +152,7 @@ class TempDirTestCase(unittest.TestCase):
         return dest
 
 
-class MountTests(unittest.TestCase):
+class MountTests(TempDirTestCase):
     """Test the Mount dataclass."""
 
     def test_target_defaults_to_source(self) -> None:
@@ -194,19 +194,61 @@ class MountTests(unittest.TestCase):
             ["--dir", "/dst", "--overlay-src", "/src", "--tmp-overlay", "/dst"],
         )
 
+    def test_create_source_makes_a_directory(self) -> None:
+        """Create the mount's host source as a directory."""
+        source = self.make_temp_dir() / "agent-config"
+        mount = launcher.Mount(source, launcher.MountKind.BIND_RW)
+
+        mount.create_source()
+
+        self.assertTrue(source.is_dir())
+
+    def test_create_source_makes_missing_parents(self) -> None:
+        """Create the source under an XDG base dir the account does not have yet."""
+        source = self.make_temp_dir() / "cache/agent-microvm"
+        mount = launcher.Mount(source, launcher.MountKind.BIND_RW)
+
+        mount.create_source()
+
+        self.assertTrue(source.is_dir())
+
+    def test_create_source_tolerates_a_racing_launcher(self) -> None:
+        """Leave the source alone when a concurrent launcher created it first."""
+        source = self.make_temp_dir() / "agent-config"
+        mount = launcher.Mount(source, launcher.MountKind.BIND_RW)
+        mount.create_source()
+        (source / "settings.json").write_text("{}")
+
+        mount.create_source()
+
+        self.assertEqual((source / "settings.json").read_text(), "{}")
+
 
 class MountKindTests(unittest.TestCase):
     """Test the mount kind specifications."""
 
-    def test_source_pre_checks(self) -> None:
-        """Check the host source of every kind consuming one, creating it for read-write binds."""
+    def test_source_policies(self) -> None:
+        """Drop a missing host source, except for the read-write binds creating theirs."""
         self.assertEqual(
-            {kind: kind.spec.source_pre_check for kind in launcher.MountKind},
+            {kind: kind.spec.source_policy for kind in launcher.MountKind},
             {
-                launcher.MountKind.TMPFS: launcher.SourcePreCheck.NONE,
-                launcher.MountKind.OVERLAYFS: launcher.SourcePreCheck.DROP_IF_MISSING,
-                launcher.MountKind.BIND_RO: launcher.SourcePreCheck.DROP_IF_MISSING,
-                launcher.MountKind.BIND_RW: launcher.SourcePreCheck.MKDIR_IF_MISSING,
+                launcher.MountKind.TMPFS: launcher.SourcePolicy.NO_SOURCE,
+                launcher.MountKind.OVERLAYFS: launcher.SourcePolicy.DROP_IF_MISSING,
+                launcher.MountKind.BIND_RO: launcher.SourcePolicy.DROP_IF_MISSING,
+                launcher.MountKind.BIND_RW: launcher.SourcePolicy.CREATE_IF_MISSING,
+            },
+        )
+
+    def test_source_policies_match_bwrap_args(self) -> None:
+        """Give a {src} placeholder to every kind drawing from a host path, and to no other."""
+        self.assertEqual(
+            {
+                kind: any("{src}" in arg for arg in kind.spec.bwrap_args)
+                for kind in launcher.MountKind
+            },
+            {
+                kind: kind.spec.source_policy is not launcher.SourcePolicy.NO_SOURCE
+                for kind in launcher.MountKind
             },
         )
 
@@ -284,6 +326,15 @@ class AgentSpecsTests(unittest.TestCase):
         self.assertEqual(len(skill_mounts), len(launcher.AGENTS))
         self.assertTrue(
             all(mount.kind is launcher.MountKind.BIND_RO for mount in skill_mounts)
+        )
+
+    def test_claude_config_lives_in_the_mounted_config_dir(self) -> None:
+        """Keep claude.json inside the bind-mounted config directory, with no mount of its own."""
+        spec = launcher.AGENTS["claude"]
+
+        self.assertEqual(spec.env["CLAUDE_CONFIG_DIR"], str(FAKE_HOME / ".claude"))
+        self.assertNotIn(
+            FAKE_HOME / ".claude.json", [mount.target for mount in spec.mounts]
         )
 
 
@@ -775,7 +826,10 @@ class ClaudeMemoryEnvTests(TempDirTestCase):
 
     def test_no_override_without_jj_default_workspace(self) -> None:
         """Leave the memory path alone outside a jj repository."""
-        self.assertEqual(launcher.AGENTS["claude"].env, {})
+        self.assertEqual(
+            launcher.AGENTS["claude"].env,
+            {"CLAUDE_CONFIG_DIR": str(FAKE_HOME / ".claude")},
+        )
 
     @unittest.skipUnless(launcher.JJ_BIN is not None, "jj is not installed")
     def test_override_keyed_on_default_workspace(self) -> None:
@@ -790,9 +844,10 @@ class ClaudeMemoryEnvTests(TempDirTestCase):
         self.assertEqual(
             module.AGENTS["claude"].env,
             {
+                "CLAUDE_CONFIG_DIR": str(FAKE_HOME / ".claude"),
                 "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": str(
                     FAKE_HOME / ".claude/projects" / slug / "memory"
-                )
+                ),
             },
         )
 

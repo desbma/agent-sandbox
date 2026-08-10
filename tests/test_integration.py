@@ -136,7 +136,7 @@ class SandboxTestCase(unittest.TestCase):
         (self.fixture.config_home / "agents").mkdir()
         (self.fixture.config_home / "agents/AGENTS.md").write_text(BASE_INSTRUCTIONS)
         (self.fixture.config_home / "claude").mkdir()
-        (self.fixture.config_home / "claude/claude.json").write_text("{}")
+        (self.fixture.config_home / "claude/.claude.json").write_text("{}")
         git = shutil.which("git")
         assert git is not None
         (self.fixture.tools_dir / "git").symlink_to(git)
@@ -765,16 +765,26 @@ class AgentSpecificTests(SandboxTestCase):
 
     def test_claude_config_round_trips(self) -> None:
         """Expose the claude config read-write at its sandbox locations."""
+        claude_json = self.fixture.home / ".claude/.claude.json"
+
         report = self.run_probe(
             [
-                Op("claude_json", OpKind.READ, self.fixture.home / ".claude.json"),
+                Op("config_dir", OpKind.ENV, "CLAUDE_CONFIG_DIR"),
+                Op("claude_json", OpKind.READ, claude_json),
+                Op("atomic_write", OpKind.RENAME_OVER, claude_json),
                 Op("write", OpKind.WRITE, self.fixture.home / ".claude/state.txt"),
             ],
             agent="claude",
         )
 
+        self.assertEqual(report["config_dir"], str(self.fixture.home / ".claude"))
         self.assertEqual(report["claude_json"], "{}")
+        # claude replaces the config with a staged file
+        self.assertEqual(report["atomic_write"], "ok")
         self.assertEqual(report["write"], "ok")
+        self.assertEqual(
+            (self.fixture.config_home / "claude/.claude.json").read_text(), "canary"
+        )
         self.assertEqual(
             (self.fixture.config_home / "claude/state.txt").read_text(), "canary"
         )
@@ -1074,8 +1084,27 @@ class AgentSpecificTests(SandboxTestCase):
         self.assertEqual(self.run_launcher(agent="claude").returncode, 0)
 
         self.assertTrue((self.fixture.config_home / "claude").is_dir())
-        self.assertTrue((self.fixture.config_home / "claude/claude.json").exists())
         self.assertTrue((self.fixture.cache_home / "agent-microvm").is_dir())
+
+    def test_first_launch_leaves_the_claude_config_to_the_agent(self) -> None:
+        """Let the agent create its config on first launch, inside the provisioned directory."""
+        shutil.rmtree(self.fixture.config_home / "claude")
+
+        config = self.fixture.home / ".claude/.claude.json"
+
+        report = self.run_probe(
+            [
+                Op("config_exists", OpKind.EXISTS, config),
+                Op("write", OpKind.WRITE, config),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(report["config_exists"], False)
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual(
+            (self.fixture.config_home / "claude/.claude.json").read_text(), "canary"
+        )
 
 
 class ScratchModeTests(SandboxTestCase):

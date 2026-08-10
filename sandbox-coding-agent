@@ -30,35 +30,35 @@ import typing
 from pathlib import Path
 
 
-class SourcePreCheck(enum.Enum):
-    """Check the launcher runs on a mount's host source path before invoking bwrap.
+class SourcePolicy(enum.Enum):
+    """Launcher-side handling of the host path a mount kind draws from.
 
     Covers the launcher side only, and says nothing of the mount points bwrap itself
     creates in the sandbox.
     """
 
-    NONE = enum.auto()
+    # the mount's src field carries the target, not a host source
+    NO_SOURCE = enum.auto()
     DROP_IF_MISSING = enum.auto()
-    MKDIR_IF_MISSING = enum.auto()
+    CREATE_IF_MISSING = enum.auto()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class MountSpec:
-    """bwrap arguments, source pre-check and agent-facing description of a way to expose a host path."""
+    """Everything needed to realize one kind of mount in the sandbox."""
 
     bwrap_args: tuple[str, ...]
     agent_description: str
-    source_pre_check: SourcePreCheck = SourcePreCheck.DROP_IF_MISSING
+    source_policy: SourcePolicy = SourcePolicy.DROP_IF_MISSING
 
 
 class MountKind(enum.Enum):
-    """Describe how a host path is exposed inside the sandbox, in instructions display order."""
+    """Sandbox mount kinds in instructions display order."""
 
     TMPFS = MountSpec(
         ("--perms", "0700", "--tmpfs", "{dst}"),
         "tmpfs filesystems (paths under these can not be accessed outside of the sandbox by the user, unless under a deeper mount point; they may also be cleared if the agent is restarted)",
-        # a tmpfs draws from no host path: its src field only carries the target
-        SourcePreCheck.NONE,
+        SourcePolicy.NO_SOURCE,
     )
     OVERLAYFS = MountSpec(
         ("--dir", "{dst}", "--overlay-src", "{src}", "--tmp-overlay", "{dst}"),
@@ -71,7 +71,7 @@ class MountKind(enum.Enum):
     BIND_RW = MountSpec(
         ("--bind", "{src}", "{dst}"),
         "normal bind mounts (allowing writes, reflected outside of the sandbox)",
-        SourcePreCheck.MKDIR_IF_MISSING,
+        SourcePolicy.CREATE_IF_MISSING,
     )
 
     @property
@@ -83,7 +83,7 @@ class MountKind(enum.Enum):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Mount:
-    """Describe a host path exposed in the sandbox, optionally remapped to another target."""
+    """One mount in the sandbox, at its source path unless dst remaps it."""
 
     src: Path
     kind: MountKind
@@ -101,6 +101,10 @@ class Mount:
             arg.format(src=self.src, dst=self.target)
             for arg in self.kind.spec.bwrap_args
         ]
+
+    def create_source(self) -> None:
+        """Create the missing host source, tolerating a launcher that raced to create it."""
+        self.src.mkdir(parents=True, exist_ok=True)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -800,16 +804,13 @@ AGENTS: dict[str, AgentSpec] = {
                 HOME / ".claude/skills",
             ),
             Mount(XDG_CONFIG_HOME / "claude", MountKind.BIND_RW, HOME / ".claude"),
-            Mount(
-                XDG_CONFIG_HOME / "claude/claude.json",
-                MountKind.BIND_RW,
-                HOME / ".claude.json",
-            ),
             Mount(Path("/opt/claude-code"), MountKind.BIND_RO),
         ),
         # the dict is built whatever the launched agent is, but only its own symlinks are used
         symlinks=claude_md_symlinks(CWD) if AGENT == "claude" else (),
-        env=(
+        # put claude.json, its lock and its rename staging in the host-backed config dir
+        env={"CLAUDE_CONFIG_DIR": str(HOME / ".claude")}
+        | (
             {}
             if JJ_DEFAULT_WS_ROOT is None
             # internal and undocumented override, keying Claude's per-project memory on the jj
@@ -981,15 +982,13 @@ if __name__ == "__main__":
 
     dir_mounts: dict[MountKind, list[Path]] = collections.defaultdict(list)
     for mount in mounts:
-        pre_check = mount.kind.spec.source_pre_check
-        # NB: an existing source may be a file
-        if (pre_check is SourcePreCheck.DROP_IF_MISSING) and not mount.src.exists():
-            continue
-        if (pre_check is SourcePreCheck.MKDIR_IF_MISSING) and not mount.src.exists():
-            # needed for agent dirs on first launch
-            mount.src.mkdir()
+        policy = mount.kind.spec.source_policy
+        if (policy is not SourcePolicy.NO_SOURCE) and not mount.src.exists():
+            if policy is SourcePolicy.DROP_IF_MISSING:
+                continue
+            mount.create_source()
         bwrap_args += mount.bwrap_args
-        if (mount.kind is MountKind.TMPFS) or mount.src.is_dir():
+        if (policy is SourcePolicy.NO_SOURCE) or mount.src.is_dir():
             dir_mounts[mount.kind].append(mount.target)
 
     # generated files

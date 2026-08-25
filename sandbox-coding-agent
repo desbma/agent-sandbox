@@ -151,6 +151,7 @@ class SandboxFacts:
     """Sandbox specifics worth describing to the agent in its generated instructions."""
 
     exchange_dir: Path | None
+    review_dir: Path | None
     dir_mounts: dict[MountKind, list[Path]]
     has_unjaild: bool
     has_proxy: bool
@@ -243,13 +244,13 @@ def shared_workspace_root(cwd: Path, ws_roots: collections.abc.Sequence[Path]) -
         default=cwd,
     )
     # a prefix more than one level above the workspace means unrelated checkouts: do not share
-    if len(current.parts) - len(shared.parts) >= EXCHANGE_MAX_PREFIX_DEPTH_DELTA:
+    if len(current.parts) - len(shared.parts) >= SHARED_DIR_MAX_PREFIX_DEPTH_DELTA:
         return cwd
     return shared
 
 
-def exchange_root(cwd: Path, repo_info: RepoInfo | None) -> Path:
-    """Return the directory identifying the exchange dir, shared by a repo's workspaces."""
+def project_identity(cwd: Path, repo_info: RepoInfo | None) -> Path:
+    """Return the directory identifying the project, shared by a repo's workspaces."""
     if repo_info is None:
         return cwd
     if repo_info.jj_workspace_roots is not None:
@@ -257,18 +258,9 @@ def exchange_root(cwd: Path, repo_info: RepoInfo | None) -> Path:
     return repo_info.root
 
 
-def exchange_dir_path(runtime_dir: Path, identity: Path) -> Path:
-    """Build the runtime exchange dir path for an identity."""
-    slug = "-".join(p.lower() for p in identity.parts[-2:])
-    return runtime_dir / "agent" / slug
-
-
-def exchange_mounts(exchange_dir: Path | None) -> list[Mount]:
-    """Return the mount exposing the exchange dir, creating it on the host if needed."""
-    if exchange_dir is None:
-        return []
-    exchange_dir.mkdir(parents=True, exist_ok=True)
-    return [Mount(exchange_dir, MountKind.BIND_RW)]
+def project_slug(identity: Path) -> str:
+    """Build the slug naming the project's shared dirs."""
+    return "-".join(p.lower() for p in identity.parts[-2:])
 
 
 def session_tmpfs_mounts(specs: collections.abc.Iterable[AgentSpec]) -> list[Mount]:
@@ -571,6 +563,10 @@ def gen_global_agents_md(agent: str, facts: SandboxFacts) -> bytes:
         bullets.append(
             f"""If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `{facts.exchange_dir}` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.""",
         )
+    if facts.review_dir is not None:
+        bullets.append(
+            f"""Code reviews are in `{facts.review_dir}` (the user may refer to this path as the "review" directory), written there by the user and by review agents.""",
+        )
     if facts.has_unjaild:
         bullets.append("`xdg-open` is available to open files or URLs for the user.")
     if facts.has_proxy:
@@ -673,8 +669,8 @@ CLAUDE_SLUG_MAX_LEN = 200
 # deepest subdirectory level searched for an AGENTS.md to expose as CLAUDE.md
 CLAUDE_MD_MAX_DEPTH = 2
 
-# maximum levels the shared exchange dir may sit above a workspace root before sharing is dropped
-EXCHANGE_MAX_PREFIX_DEPTH_DELTA = 2
+# maximum levels a project's shared dirs may sit above a workspace root before sharing is dropped
+SHARED_DIR_MAX_PREFIX_DEPTH_DELTA = 2
 
 # host CPU topology, read from sysfs and handed to the guest microvm launcher
 SYS_CPU_DIR = Path("/sys/devices/system/cpu")
@@ -716,7 +712,6 @@ MOUNTS: list[Mount] = [
     Mount(XDG_CONFIG_HOME / "jj/repos", MountKind.BIND_RO, HOME / ".config/jj/repos"),
     Mount(XDG_CONFIG_HOME / "rumdl", MountKind.BIND_RO, HOME / ".config/rumdl"),
     Mount(HOME / ".local/libexec/agents", MountKind.BIND_RO),
-    Mount(XDG_STATE_HOME / "neorev", MountKind.BIND_RO, HOME / ".local/state/neorev"),
     *(Mount(vcs_dir, MountKind.BIND_RO) for vcs_dir in vcs_dirs(CWD, REPO_INFO)),
     # overlayfs (writes don't reach host)
     Mount(
@@ -956,12 +951,22 @@ if __name__ == "__main__":
     entry = AGENTS.get(AGENT, AgentSpec())
     agents = {AGENT: entry} | {name: AGENTS[name] for name in extras}
 
-    # exchange dir in /run, shared across a jj repo's workspaces
-    exchange_dir = (
-        None
-        if SCRATCH_MODE
-        else exchange_dir_path(XDG_RUNTIME_DIR, exchange_root(CWD, REPO_INFO))
-    )
+    # dirs shared with the host, keyed on the project and shared across a jj repo's workspaces
+    exchange_dir: Path | None = None
+    review_dir: Path | None = None
+    shared_dir_mounts: list[Mount] = []
+    if not SCRATCH_MODE:
+        slug = project_slug(project_identity(CWD, REPO_INFO))
+        exchange_dir = XDG_RUNTIME_DIR / "agent" / slug
+        review_dir = HOME / ".local/state/agents/reviews" / slug
+        shared_dir_mounts = [
+            Mount(exchange_dir, MountKind.BIND_RW),
+            Mount(
+                XDG_STATE_HOME / "agents/reviews" / slug,
+                MountKind.BIND_RW,
+                review_dir,
+            ),
+        ]
 
     # static mounts plus every conditional one, deduplicated and ordered for bwrap
     mounts = resolve_mounts(
@@ -970,7 +975,7 @@ if __name__ == "__main__":
             *(mount for spec in agents.values() for mount in spec.mounts),
             *auth_profile_mounts(agents),
             *agent_binary_mounts(agents, extras),
-            *exchange_mounts(exchange_dir),
+            *shared_dir_mounts,
             *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),
             *tool_mounts(),
             *cargo_target_mounts(),
@@ -998,6 +1003,7 @@ if __name__ == "__main__":
         files[CPU_TOPOLOGY_PATH] = File(cpu_topology)
     sandbox_facts = SandboxFacts(
         exchange_dir=exchange_dir,
+        review_dir=review_dir,
         dir_mounts=dir_mounts,
         has_unjaild=bool(UNJAIL_MOUNTS),
         has_proxy=PROXY_ACTIVE,

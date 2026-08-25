@@ -83,10 +83,21 @@ class SandboxFixture:
             "TERM": TEST_TERM,
         }
 
+    def project_slug(self) -> str:
+        """Return the slug the launcher derives for the project."""
+        return "-".join(p.lower() for p in (self.root.name, "project"))
+
     def exchange_dir(self) -> Path:
         """Return the exchange directory path the launcher derives for the project."""
-        name = "-".join(p.lower() for p in (self.root.name, "project"))
-        return self.runtime_dir / "agent" / name
+        return self.runtime_dir / "agent" / self.project_slug()
+
+    def review_dir(self) -> Path:
+        """Return the sandbox review directory path the launcher derives for the project."""
+        return self.home / ".local/state/agents/reviews" / self.project_slug()
+
+    def host_review_dir(self) -> Path:
+        """Return the host directory backing the sandbox review directory."""
+        return self.state_home / "agents/reviews" / self.project_slug()
 
     def sandbox_path(self) -> str:
         """Return the PATH value the launcher sets inside the sandbox."""
@@ -617,6 +628,8 @@ class InstructionsTests(SandboxTestCase):
         self.assertIn(f"`{self.fixture.project_dir}`", rw_line)
         self.assertIn(f"`{self.fixture.exchange_dir()}`", rw_line)
         self.assertIn(f"place them under `{self.fixture.exchange_dir()}`", content)
+        self.assertIn(f"`{self.fixture.review_dir()}`", rw_line)
+        self.assertIn(f"Code reviews are in `{self.fixture.review_dir()}`", content)
         self.assertNotIn("overlayfs filesystems", content)
         self.assertNotIn("xdg-open", content)
         self.assertNotIn("`gh`", content)
@@ -714,8 +727,26 @@ class InstructionsTests(SandboxTestCase):
         self.assertEqual(report["write"], "ok")
         self.assertEqual((exchange / "note.txt").read_text(), "canary")
 
-    def test_no_exchange_dir_for_project_under_tmp(self) -> None:
-        """Skip the exchange directory when the project lives under /tmp."""
+    def test_review_dir_round_trips(self) -> None:
+        """Create the review directory and reflect sandbox writes on the host."""
+        review = self.fixture.review_dir()
+
+        report = self.run_probe(
+            [
+                Op("is_dir", OpKind.ISDIR, review),
+                Op("write", OpKind.WRITE, review / "note.txt"),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(report["is_dir"], True)
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual(
+            (self.fixture.host_review_dir() / "note.txt").read_text(), "canary"
+        )
+
+    def test_no_shared_dirs_for_project_under_tmp(self) -> None:
+        """Skip the exchange and review directories when the project lives under /tmp."""
         project = Path(tempfile.mkdtemp(dir="/tmp")).resolve()
         self.addCleanup(shutil.rmtree, project, ignore_errors=True)
 
@@ -731,8 +762,11 @@ class InstructionsTests(SandboxTestCase):
 
         self.assertEqual(report["cwd"], str(project))
         self.assertEqual(report["runtime_entries"], [])
-        self.assertNotIn("exchange", self.report_str(report, "claude_md"))
+        content = self.report_str(report, "claude_md")
+        self.assertNotIn("exchange", content)
+        self.assertNotIn("reviews", content)
         self.assertEqual(list(self.fixture.runtime_dir.iterdir()), [])
+        self.assertEqual(list(self.fixture.state_home.iterdir()), [])
 
     def test_unjail_tools_expose_xdg_open(self) -> None:
         """Expose xdg-open in the sandbox when the unjail tools are on PATH."""

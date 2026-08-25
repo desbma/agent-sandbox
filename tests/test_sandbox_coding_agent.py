@@ -83,6 +83,7 @@ atexit.register(shutil.rmtree, FIXTURE_ROOT, ignore_errors=True)
 # sandbox facts with every optional element absent, base for the instructions rendering tests
 EMPTY_SANDBOX_FACTS = launcher.SandboxFacts(
     exchange_dir=None,
+    review_dir=None,
     dir_mounts={},
     has_unjaild=False,
     has_proxy=False,
@@ -716,6 +717,15 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
         self.assertIn("place them under `/run/user/1000/exchange`", with_bullet)
         self.assertNotIn("exchange", without_bullet)
 
+    def test_review_dir_bullet(self) -> None:
+        """Mention the review directory only when one exists."""
+        with_bullet = self.render(review_dir=Path("/home/x/.local/state/reviews/proj"))
+        without_bullet = self.render()
+
+        self.assertIn("`/home/x/.local/state/reviews/proj`", with_bullet)
+        self.assertIn('"review" directory', with_bullet)
+        self.assertNotIn("review", without_bullet)
+
     def test_unjaild_bullet(self) -> None:
         """Mention xdg-open only when the unjail tools are available."""
         with_bullet = self.render(has_unjaild=True)
@@ -1080,14 +1090,14 @@ class VcsDirsTests(TempDirTestCase):
         )
 
 
-class ExchangeRootTests(TempDirTestCase):
-    """Test the identity directory keying the exchange dir."""
+class ProjectIdentityTests(TempDirTestCase):
+    """Test the identity directory keying the project's shared dirs."""
 
     def test_cwd_outside_a_repo(self) -> None:
         """Key on the launch dir when it is not in a repository."""
         cwd = self.make_temp_dir()
 
-        self.assertEqual(launcher.exchange_root(cwd, None), cwd)
+        self.assertEqual(launcher.project_identity(cwd, None), cwd)
 
     def test_git_repo_root(self) -> None:
         """Key on the repository root in a git repository."""
@@ -1096,7 +1106,7 @@ class ExchangeRootTests(TempDirTestCase):
 
         info = launcher.RepoInfo(repo, None, None)
 
-        self.assertEqual(launcher.exchange_root(subdir, info), repo)
+        self.assertEqual(launcher.project_identity(subdir, info), repo)
 
     def test_jj_workspaces_share_a_root(self) -> None:
         """Key every workspace of a jj repository on their shared directory."""
@@ -1106,7 +1116,7 @@ class ExchangeRootTests(TempDirTestCase):
             root.mkdir(parents=True)
         info = launcher.RepoInfo(roots[1], roots[0], tuple(roots))
 
-        self.assertEqual(launcher.exchange_root(roots[1], info), base / "proj")
+        self.assertEqual(launcher.project_identity(roots[1], info), base / "proj")
 
 
 class ParseCpuListTests(unittest.TestCase):
@@ -1501,24 +1511,21 @@ class ScratchModeTests(TempDirTestCase):
         self.assertFalse(module.SCRATCH_MODE)
 
 
-class ExchangeDirPathTests(unittest.TestCase):
-    """Test construction of the runtime exchange dir path."""
+class ProjectSlugTests(unittest.TestCase):
+    """Test the slug naming the project's shared dirs."""
 
-    def test_builds_name_from_last_two_parts(self) -> None:
-        """Name the dir after the identity's last two components."""
-        path = launcher.exchange_dir_path(
-            Path("/run/user/1000"), Path("/home/x/Projets/proj")
+    def test_builds_slug_from_last_two_parts(self) -> None:
+        """Build the slug from the identity's last two components."""
+        self.assertEqual(
+            launcher.project_slug(Path("/home/x/Projets/proj")), "projets-proj"
         )
-
-        self.assertEqual(path, Path("/run/user/1000/agent/projets-proj"))
 
     def test_lowercases_components(self) -> None:
-        """Lowercase the identity components in the dir name."""
-        path = launcher.exchange_dir_path(
-            Path("/run/user/1000"), Path("/home/x/Projets/AgentSandbox")
+        """Lowercase the identity components in the slug."""
+        self.assertEqual(
+            launcher.project_slug(Path("/home/x/Projets/AgentSandbox")),
+            "projets-agentsandbox",
         )
-
-        self.assertEqual(path, Path("/run/user/1000/agent/projets-agentsandbox"))
 
 
 class ClaudePathHashTests(unittest.TestCase):

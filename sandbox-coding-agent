@@ -125,8 +125,8 @@ class AgentSpec:
     session_dir: Path | None = None
     # credentials file mount, None for agents without auth profile support
     credentials: Mount | None = None
-    # command logging an auth profile in, None when the agent handles empty credentials itself
-    auth_profile_login: str | None = None
+    # arguments of the agent's own login command, None when it starts fine on empty credentials
+    login_args: tuple[str, ...] | None = None
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
@@ -291,8 +291,10 @@ def profile_credentials(credentials: Path, profile: str) -> Path:
 
 def auth_profile_mounts(
     agents: collections.abc.Mapping[str, AgentSpec],
+    launched_agent: str,
+    launched_args: collections.abc.Sequence[str],
 ) -> list[Mount]:
-    """Return each agent's selected profile mounts, reporting the profiles needing a login."""
+    """Return each agent's selected profile mounts."""
     mounts = []
     for name, spec in agents.items():
         profile_var = f"SANDBOX_AGENT_{name.upper()}_AUTH"
@@ -302,13 +304,19 @@ def auth_profile_mounts(
         if spec.credentials is None:
             fatal_error(f"Agent {name!r} does not support auth profiles")
         credentials = profile_credentials(spec.credentials.src, profile)
-        login = spec.auth_profile_login
-        if (login is not None) and (credentials.read_text() == EMPTY_CREDENTIALS):
-            # without the selector the login would land on the default credentials
-            show_message(
-                f"{name.title()} auth profile {profile!r} is empty, "
-                f"run `{profile_var}={shlex.quote(profile)} {login}`"
+        login_args = spec.login_args
+        if (login_args is not None) and (credentials.read_text() == EMPTY_CREDENTIALS):
+            runs_login = (name == launched_agent) and (
+                tuple(launched_args[: len(login_args)]) == login_args
             )
+            # the login is the command writing the credentials, anything else would start only
+            # to reject them
+            if not runs_login:
+                # without the selector the login would land on the default credentials
+                command = shlex.join([f"{profile_var}={profile}", name, *login_args])
+                fatal_error(
+                    f"{name.title()} auth profile {profile!r} is empty, run `{command}`"
+                )
         mounts.append(dataclasses.replace(spec.credentials, src=credentials))
     return mounts
 
@@ -597,14 +605,14 @@ def gen_global_agents_md(agent: str, facts: SandboxFacts) -> bytes:
     return f"{body}\n".encode()
 
 
-def resolve_extra_agents(entry: str) -> dict[str, Path]:
-    """Map each installed always-provisioned agent other than entry to its binary."""
+def resolve_extra_agents(launched_agent: str) -> dict[str, Path]:
+    """Map each installed always-provisioned agent other than the launched one to its binary."""
     resolved: dict[str, Path] = {}
     for name, spec in AGENTS.items():
         binary = next(
             (path for path in spec.provision_always if os.access(path, os.X_OK)), None
         )
-        if (name != entry) and (binary is not None):
+        if (name != launched_agent) and (binary is not None):
             resolved[name] = binary
     return resolved
 
@@ -829,7 +837,7 @@ AGENTS: dict[str, AgentSpec] = {
             HOME / ".codex/auth.json",
         ),
         # codex rejects empty credentials instead of treating them as logged out
-        auth_profile_login="codex login",
+        login_args=("login",),
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -948,8 +956,8 @@ if __name__ == "__main__":
 
     # agents provisioned in the sandbox: the launched one and any installed always-on extra
     extras = resolve_extra_agents(AGENT)
-    entry = AGENTS.get(AGENT, AgentSpec())
-    agents = {AGENT: entry} | {name: AGENTS[name] for name in extras}
+    launched_spec = AGENTS.get(AGENT, AgentSpec())
+    agents = {AGENT: launched_spec} | {name: AGENTS[name] for name in extras}
 
     # dirs shared with the host, keyed on the project and shared across a jj repo's workspaces
     exchange_dir: Path | None = None
@@ -973,7 +981,7 @@ if __name__ == "__main__":
         [
             *MOUNTS,
             *(mount for spec in agents.values() for mount in spec.mounts),
-            *auth_profile_mounts(agents),
+            *auth_profile_mounts(agents, AGENT, args[1:]),
             *agent_binary_mounts(agents, extras),
             *shared_dir_mounts,
             *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),
@@ -1021,7 +1029,7 @@ if __name__ == "__main__":
         bwrap_args += ["--ro-bind-data", str(fd), str(path)]
 
     # symlinks
-    for target, link in (SYMLINKS | dict(entry.symlinks)).items():
+    for target, link in (SYMLINKS | dict(launched_spec.symlinks)).items():
         if target.exists():
             bwrap_args += ["--symlink", str(target), str(link)]
 
@@ -1034,7 +1042,7 @@ if __name__ == "__main__":
     }
     bwrap_args.append("--clearenv")
     # forwarded last: a host value overrides what the sandbox sets for the same variable
-    for env_k, env_v in (ENV_SET | PROXY_ENV | entry.env | forwarded).items():
+    for env_k, env_v in (ENV_SET | PROXY_ENV | launched_spec.env | forwarded).items():
         bwrap_args += ["--setenv", env_k, env_v]
 
     bwrap_args += [

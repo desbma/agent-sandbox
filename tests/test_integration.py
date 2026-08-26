@@ -165,11 +165,12 @@ class SandboxTestCase(unittest.TestCase):
             check=True,
         )
 
-    def run_launcher(
+    def run_launcher(  # noqa: PLR0913
         self,
         ops: collections.abc.Sequence[Op] = (),
         *,
         agent: str,
+        agent_args: collections.abc.Sequence[str] = (),
         extra_env: dict[str, str] | None = None,
         cwd: Path | None = None,
         exit_code: int = 0,
@@ -188,7 +189,7 @@ class SandboxTestCase(unittest.TestCase):
             }
         )
         return subprocess.run(
-            [sys.executable, str(SCRIPT_PATH), str(probe), plan],
+            [sys.executable, str(SCRIPT_PATH), str(probe), *agent_args, plan],
             cwd=cwd or self.fixture.project_dir,
             env=self.fixture.env() | (extra_env or {}),
             stdin=subprocess.DEVNULL,
@@ -910,26 +911,32 @@ class AgentSpecificTests(SandboxTestCase):
         self.assertEqual((credentials.parent / "auth-work.json").read_text(), "{}")
         self.assertEqual(credentials.read_text(), '{"token": "default"}')
 
-    def test_auth_profile_of_codex_points_at_its_login_command(self) -> None:
-        """Report the codex login command while the selected profile holds no credentials."""
+    def test_auth_profile_of_codex_holds_it_back_until_its_login(self) -> None:
+        """Hold codex back until its own login command has filled the selected profile."""
         credentials = self.fixture.config_home / "codex/auth.json"
         profile = self.fixture.config_home / "codex/auth-pro.json"
         sandbox_credentials = self.fixture.home / ".codex/auth.json"
 
         logged_out = self.run_launcher(
+            agent="codex", extra_env={"SANDBOX_AGENT_CODEX_AUTH": "pro"}
+        )
+
+        self.assertEqual(logged_out.returncode, 1)
+        self.assertIn("SANDBOX_AGENT_CODEX_AUTH=pro codex login", logged_out.stderr)
+        self.assertEqual(logged_out.stdout, "")
+
+        login = self.run_launcher(
             [
                 Op("credentials", OpKind.READ, sandbox_credentials),
                 Op("login", OpKind.WRITE, sandbox_credentials),
             ],
             agent="codex",
+            agent_args=["login"],
             extra_env={"SANDBOX_AGENT_CODEX_AUTH": "pro"},
         )
 
-        self.assertEqual(logged_out.returncode, 0)
-        self.assertIn("codex login", logged_out.stderr)
-        self.assertEqual(
-            json.loads(logged_out.stdout), {"credentials": "{}", "login": "ok"}
-        )
+        self.assertEqual(login.returncode, 0)
+        self.assertEqual(json.loads(login.stdout), {"credentials": "{}", "login": "ok"})
         # the login the message asks for must reach the profile, not the default account
         self.assertEqual(profile.read_text(), "canary")
         # bwrap creates the missing mount point in the host config directory

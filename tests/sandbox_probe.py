@@ -94,8 +94,8 @@ class Op:
 
 
 def main() -> None:
-    """Read the plan from argv, run each op, print the report, and exit with its code."""
-    plan = json.loads(sys.argv[1])
+    """Run the plan in the last argument, print the report, and exit with its code."""
+    plan = json.loads(sys.argv[-1])
     report: dict[str, object] = {}
     for raw in plan["ops"]:
         op = Op(raw["label"], OpKind[raw["kind"]], raw["arg"])

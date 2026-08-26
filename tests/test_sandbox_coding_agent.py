@@ -391,7 +391,12 @@ class AuthProfileMountsTests(TempDirTestCase):
         )
 
     def resolve(
-        self, agents: dict[str, launcher.AgentSpec], **profiles: str
+        self,
+        agents: dict[str, launcher.AgentSpec],
+        *,
+        launched_agent: str = "claude",
+        launched_args: collections.abc.Sequence[str] = (),
+        **profiles: str,
     ) -> list[launcher.Mount]:
         """Resolve the auth profile mounts of agents, with only the given profiles selected."""
         env = {
@@ -399,15 +404,38 @@ class AuthProfileMountsTests(TempDirTestCase):
             for name, profile in profiles.items()
         }
         with unittest.mock.patch.dict(os.environ, env, clear=True):
-            return launcher.auth_profile_mounts(agents)
+            return launcher.auth_profile_mounts(agents, launched_agent, launched_args)
 
     def resolve_report(
-        self, agents: dict[str, launcher.AgentSpec], **profiles: str
+        self,
+        agents: dict[str, launcher.AgentSpec],
+        *,
+        launched_agent: str = "claude",
+        launched_args: collections.abc.Sequence[str] = (),
+        **profiles: str,
     ) -> str:
         """Resolve the auth profile mounts of agents, returning what the launcher reported."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            self.resolve(agents, **profiles)
+            self.resolve(
+                agents,
+                launched_agent=launched_agent,
+                launched_args=launched_args,
+                **profiles,
+            )
+        return stderr.getvalue()
+
+    def fail_report(
+        self,
+        agents: dict[str, launcher.AgentSpec],
+        *,
+        launched_agent: str = "claude",
+        **profiles: str,
+    ) -> str:
+        """Resolve the auth profile mounts of agents, returning what the aborted launch reported."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self.resolve(agents, launched_agent=launched_agent, **profiles)
         return stderr.getvalue()
 
     def claude_mount(self, src: Path) -> list[launcher.Mount]:
@@ -519,37 +547,78 @@ class AuthProfileMountsTests(TempDirTestCase):
 
     def test_rejects_agent_without_credentials(self) -> None:
         """Fail when a profile is selected for an agent that keeps no credentials file."""
-        with (
-            contextlib.redirect_stderr(io.StringIO()),
-            self.assertRaises(SystemExit),
-        ):
-            self.resolve({"amp": launcher.AgentSpec()}, amp="pro")
+        report = self.fail_report({"amp": launcher.AgentSpec()}, amp="pro")
+
+        self.assertIn("does not support auth profiles", report)
 
     def test_login_commands_of_known_agents(self) -> None:
         """Name a login command for the agents that refuse to start on empty credentials."""
         self.assertEqual(
-            {name: spec.auth_profile_login for name, spec in launcher.AGENTS.items()},
-            {"amp": None, "claude": None, "codex": "codex login", "pi": None},
+            {name: spec.login_args for name, spec in launcher.AGENTS.items()},
+            {"amp": None, "claude": None, "codex": ("login",), "pi": None},
         )
 
-    def test_reports_a_profile_that_was_never_logged_into(self) -> None:
-        """Point at the agent's login command while the profile credentials stay empty."""
-        spec = dataclasses.replace(self.spec, auth_profile_login="codex login")
+    def test_refuses_to_start_the_launched_agent_on_an_empty_profile(self) -> None:
+        """Fail before starting an agent that would only reject the empty credentials."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
 
-        report = self.resolve_report({"codex": spec}, codex="pro")
+        report = self.fail_report({"codex": spec}, launched_agent="codex", codex="pro")
 
         # a login command missing the selector would overwrite the default credentials
         self.assertIn("`SANDBOX_AGENT_CODEX_AUTH=pro codex login`", report)
-        # the seeding launch is not the only one to report it, the profile stays unusable until
-        # the login writes credentials
-        self.assertEqual(self.resolve_report({"codex": spec}, codex="pro"), report)
+        # the seeding launch is not the only one to fail, the profile stays unusable until the
+        # login writes credentials
+        self.assertEqual(
+            self.fail_report({"codex": spec}, launched_agent="codex", codex="pro"),
+            report,
+        )
+
+    def test_starts_the_login_filling_an_empty_profile(self) -> None:
+        """Expose the empty credentials to the login command meant to write them."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            mounts = self.resolve(
+                {"codex": spec},
+                launched_agent="codex",
+                launched_args=("login",),
+                codex="pro",
+            )
+
+        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_starts_a_login_carrying_its_own_arguments(self) -> None:
+        """Recognize the login command whatever arguments follow it."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
+
+        report = self.resolve_report(
+            {"codex": spec},
+            launched_agent="codex",
+            launched_args=("login", "--api-key", "secret"),
+            codex="pro",
+        )
+
+        self.assertEqual(report, "")
+
+    def test_refuses_to_start_on_the_empty_profile_of_another_agent(self) -> None:
+        """Fail on an empty profile selected for an agent that is provisioned but not launched."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
+
+        report = self.fail_report({"codex": spec}, launched_agent="claude", codex="pro")
+
+        self.assertIn("`SANDBOX_AGENT_CODEX_AUTH=pro codex login`", report)
 
     def test_reports_nothing_once_the_profile_is_logged_in(self) -> None:
         """Stay quiet once the profile credentials hold a login."""
-        spec = dataclasses.replace(self.spec, auth_profile_login="codex login")
+        spec = dataclasses.replace(self.spec, login_args=("login",))
         self.profile.write_text('{"token": "pro"}')
 
-        self.assertEqual(self.resolve_report({"codex": spec}, codex="pro"), "")
+        self.assertEqual(
+            self.resolve_report({"codex": spec}, launched_agent="codex", codex="pro"),
+            "",
+        )
 
     def test_reports_nothing_for_an_agent_starting_logged_out(self) -> None:
         """Stay quiet for an agent whose own login flow handles empty credentials."""

@@ -289,6 +289,18 @@ def profile_credentials(credentials: Path, profile: str) -> Path:
     return variant
 
 
+def runs_login(
+    launched_args: collections.abc.Sequence[str],
+    login_args: collections.abc.Sequence[str],
+) -> bool:
+    """Return whether the launched arguments invoke the agent's login command."""
+    # the PATH wrapper inserts the agent's own flags before the arguments it was called with
+    return any(
+        list(launched_args[index : index + len(login_args)]) == list(login_args)
+        for index in range(len(launched_args))
+    )
+
+
 def auth_profile_mounts(
     agents: collections.abc.Mapping[str, AgentSpec],
     launched_agent: str,
@@ -306,12 +318,12 @@ def auth_profile_mounts(
         credentials = profile_credentials(spec.credentials.src, profile)
         login_args = spec.login_args
         if (login_args is not None) and (credentials.read_text() == EMPTY_CREDENTIALS):
-            runs_login = (name == launched_agent) and (
-                tuple(launched_args[: len(login_args)]) == login_args
+            logging_in = (name == launched_agent) and runs_login(
+                launched_args, login_args
             )
             # the login is the command writing the credentials, anything else would start only
             # to reject them
-            if not runs_login:
+            if not logging_in:
                 # without the selector the login would land on the default credentials
                 command = shlex.join([f"{profile_var}={profile}", name, *login_args])
                 fatal_error(

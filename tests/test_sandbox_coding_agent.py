@@ -430,12 +430,18 @@ class AuthProfileMountsTests(TempDirTestCase):
         agents: dict[str, launcher.AgentSpec],
         *,
         launched_agent: str = "claude",
+        launched_args: collections.abc.Sequence[str] = (),
         **profiles: str,
     ) -> str:
         """Resolve the auth profile mounts of agents, returning what the aborted launch reported."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
-            self.resolve(agents, launched_agent=launched_agent, **profiles)
+            self.resolve(
+                agents,
+                launched_agent=launched_agent,
+                launched_args=launched_args,
+                **profiles,
+            )
         return stderr.getvalue()
 
     def claude_mount(self, src: Path) -> list[launcher.Mount]:
@@ -607,6 +613,45 @@ class AuthProfileMountsTests(TempDirTestCase):
         spec = dataclasses.replace(self.spec, login_args=("login",))
 
         report = self.fail_report({"codex": spec}, launched_agent="claude", codex="pro")
+
+        self.assertIn("`SANDBOX_AGENT_CODEX_AUTH=pro codex login`", report)
+
+    def test_starts_a_login_behind_the_wrapper_flags(self) -> None:
+        """Recognize the login command behind the flags the PATH wrapper inserts."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
+
+        report = self.resolve_report(
+            {"codex": spec},
+            launched_agent="codex",
+            launched_args=("--dangerously-bypass-approvals-and-sandbox", "login"),
+            codex="pro",
+        )
+
+        self.assertEqual(report, "")
+
+    def test_starts_a_login_between_wrapper_flags_and_its_own_arguments(self) -> None:
+        """Recognize the login command surrounded by wrapper flags and its own arguments."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
+
+        report = self.resolve_report(
+            {"codex": spec},
+            launched_agent="codex",
+            launched_args=("--yolo", "login", "--api-key", "secret"),
+            codex="pro",
+        )
+
+        self.assertEqual(report, "")
+
+    def test_refuses_to_start_on_a_command_resembling_the_login(self) -> None:
+        """Fail when the launched command only looks like the login one."""
+        spec = dataclasses.replace(self.spec, login_args=("login",))
+
+        report = self.fail_report(
+            {"codex": spec},
+            launched_agent="codex",
+            launched_args=("--yolo", "logout"),
+            codex="pro",
+        )
 
         self.assertIn("`SANDBOX_AGENT_CODEX_AUTH=pro codex login`", report)
 

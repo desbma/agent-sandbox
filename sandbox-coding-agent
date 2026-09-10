@@ -857,6 +857,7 @@ AGENTS: dict[str, AgentSpec] = {
                 HOME / ".agents/skills",
             ),
             Mount(XDG_CONFIG_HOME / "codex", MountKind.BIND_RW, HOME / ".codex"),
+            Mount(HOME / ".local/libexec/codex-code-mode-host", MountKind.BIND_RO),
         ),
         files={
             # trust the launch directory to avoid codex's confirmation prompt; codex merges this

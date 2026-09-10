@@ -1054,6 +1054,20 @@ class AgentSpecificTests(SandboxTestCase):
             (self.fixture.config_home / "codex/config.toml").read_text(), "canary"
         )
 
+    def test_codex_code_mode_host_stays_executable(self) -> None:
+        """Expose the codex code-mode host helper executable beside the codex binary."""
+        helper = self.fixture.home / ".local/libexec/codex-code-mode-host"
+        helper.parent.mkdir(parents=True)
+        helper.write_text(EXECUTABLE_STUB)
+        helper.chmod(0o755)
+
+        report = self.run_probe(
+            [Op("helper_executable", OpKind.ACCESS_X, helper)],
+            agent="codex",
+        )
+
+        self.assertEqual(report["helper_executable"], True)
+
     def test_pi_gets_npmrc_and_instructions(self) -> None:
         """Generate the npm prefix config and instructions for pi."""
         report = self.run_probe(

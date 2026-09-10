@@ -329,6 +329,16 @@ class AgentSpecsTests(unittest.TestCase):
             all(mount.kind is launcher.MountKind.BIND_RO for mount in skill_mounts)
         )
 
+    def test_codex_code_mode_host_is_exposed(self) -> None:
+        """Expose codex's code-mode host helper read-only next to the codex binary."""
+        self.assertIn(
+            launcher.Mount(
+                FAKE_HOME / ".local/libexec/codex-code-mode-host",
+                launcher.MountKind.BIND_RO,
+            ),
+            launcher.AGENTS["codex"].mounts,
+        )
+
     def test_claude_config_lives_in_the_mounted_config_dir(self) -> None:
         """Keep claude.json inside the bind-mounted config directory, with no mount of its own."""
         spec = launcher.AGENTS["claude"]

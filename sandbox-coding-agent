@@ -152,6 +152,7 @@ class SandboxFacts:
 
     exchange_dir: Path | None
     review_dir: Path | None
+    handoff_dir: Path | None
     dir_mounts: dict[MountKind, list[Path]]
     has_unjaild: bool
     has_proxy: bool
@@ -579,13 +580,17 @@ def gen_global_agents_md(agent: str, facts: SandboxFacts) -> bytes:
             filesystem_note.append(f"  - {kind.spec.agent_description}: {joined}")
 
     bullets = ["\n".join(filesystem_note)]
-    if facts.exchange_dir is not None:
+    if facts.handoff_dir is not None:
         bullets.append(
-            f"""If you need to share files with the user that don't belong in the repository (ie. markdown summary, plan files, logs, etc.), place them under `{facts.exchange_dir}` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.""",
+            f"""Documents meant to persist across sessions (handoff notes, plan files, etc.) are in `{facts.handoff_dir}` (the user may refer to this path as the "handoff" directory); write them there.""",
         )
     if facts.review_dir is not None:
         bullets.append(
             f"""Code reviews are in `{facts.review_dir}` (the user may refer to this path as the "review" directory), written there by the user and by review agents.""",
+        )
+    if facts.exchange_dir is not None:
+        bullets.append(
+            f"""If you need to share other files with the user that don't belong in the repository (ie. logs, captures, generated reports), place them under `{facts.exchange_dir}` (the user may refer to this path as the "shared" or "exchange" directory), and show the absolute path of the files to the user, so it is easier to copy.""",
         )
     if facts.has_unjaild:
         bullets.append("`xdg-open` is available to open files or URLs for the user.")
@@ -975,17 +980,24 @@ if __name__ == "__main__":
     # dirs shared with the host, keyed on the project and shared across a jj repo's workspaces
     exchange_dir: Path | None = None
     review_dir: Path | None = None
+    handoff_dir: Path | None = None
     shared_dir_mounts: list[Mount] = []
     if not SCRATCH_MODE:
         slug = project_slug(project_identity(CWD, REPO_INFO))
         exchange_dir = XDG_RUNTIME_DIR / "agents" / slug
         review_dir = HOME / ".local/state/agents/reviews" / slug
+        handoff_dir = HOME / ".local/state/agents/handoff" / slug
         shared_dir_mounts = [
             Mount(exchange_dir, MountKind.BIND_RW),
             Mount(
                 XDG_STATE_HOME / "agents/reviews" / slug,
                 MountKind.BIND_RW,
                 review_dir,
+            ),
+            Mount(
+                XDG_STATE_HOME / "agents/handoff" / slug,
+                MountKind.BIND_RW,
+                handoff_dir,
             ),
         ]
 
@@ -1025,6 +1037,7 @@ if __name__ == "__main__":
     sandbox_facts = SandboxFacts(
         exchange_dir=exchange_dir,
         review_dir=review_dir,
+        handoff_dir=handoff_dir,
         dir_mounts=dir_mounts,
         has_unjaild=bool(UNJAIL_MOUNTS),
         has_proxy=PROXY_ACTIVE,

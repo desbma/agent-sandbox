@@ -84,6 +84,7 @@ atexit.register(shutil.rmtree, FIXTURE_ROOT, ignore_errors=True)
 EMPTY_SANDBOX_FACTS = launcher.SandboxFacts(
     exchange_dir=None,
     review_dir=None,
+    handoff_dir=None,
     dir_mounts={},
     has_unjaild=False,
     has_proxy=False,
@@ -839,6 +840,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
         without_bullet = self.render()
 
         self.assertIn("place them under `/run/user/1000/exchange`", with_bullet)
+        self.assertNotIn("plan files", with_bullet)
         self.assertNotIn("exchange", without_bullet)
 
     def test_review_dir_bullet(self) -> None:
@@ -849,6 +851,28 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
         self.assertIn("`/home/x/.local/state/reviews/proj`", with_bullet)
         self.assertIn('"review" directory', with_bullet)
         self.assertNotIn("review", without_bullet)
+
+    def test_handoff_dir_bullet(self) -> None:
+        """Mention the handoff directory only when one exists."""
+        with_bullet = self.render(
+            handoff_dir=Path("/home/x/.local/state/agents/handoff/proj")
+        )
+        without_bullet = self.render()
+
+        self.assertIn("`/home/x/.local/state/agents/handoff/proj`", with_bullet)
+        self.assertIn('"handoff" directory', with_bullet)
+        self.assertNotIn("handoff", without_bullet)
+
+    def test_shared_dir_bullets_order(self) -> None:
+        """List the handoff directory first, then the review one, then the exchange one."""
+        content = self.render(
+            exchange_dir=Path("/run/user/1000/exchange"),
+            review_dir=Path("/home/x/.local/state/agents/reviews/proj"),
+            handoff_dir=Path("/home/x/.local/state/agents/handoff/proj"),
+        )
+
+        self.assertLess(content.index("handoff"), content.index("Code reviews"))
+        self.assertLess(content.index("Code reviews"), content.index("exchange"))
 
     def test_unjaild_bullet(self) -> None:
         """Mention xdg-open only when the unjail tools are available."""

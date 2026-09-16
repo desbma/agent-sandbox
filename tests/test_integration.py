@@ -89,7 +89,7 @@ class SandboxFixture:
 
     def exchange_dir(self) -> Path:
         """Return the exchange directory path the launcher derives for the project."""
-        return self.runtime_dir / "agent" / self.project_slug()
+        return self.runtime_dir / "agents" / self.project_slug()
 
     def review_dir(self) -> Path:
         """Return the sandbox review directory path the launcher derives for the project."""

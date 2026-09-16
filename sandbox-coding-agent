@@ -978,7 +978,7 @@ if __name__ == "__main__":
     shared_dir_mounts: list[Mount] = []
     if not SCRATCH_MODE:
         slug = project_slug(project_identity(CWD, REPO_INFO))
-        exchange_dir = XDG_RUNTIME_DIR / "agent" / slug
+        exchange_dir = XDG_RUNTIME_DIR / "agents" / slug
         review_dir = HOME / ".local/state/agents/reviews" / slug
         shared_dir_mounts = [
             Mount(exchange_dir, MountKind.BIND_RW),

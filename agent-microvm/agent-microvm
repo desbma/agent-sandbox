@@ -120,6 +120,7 @@ WORKSPACE_SHARE_TAG = "workspace"
 WORKSPACE_MOUNTPOINT = GUEST_USER_HOME / "workspace"
 EXCHANGE_SHARE_TAG = "exchange"
 EXCHANGE_DIR_NAME = "agent-microvm-exchange"
+EXCHANGE_MOUNTPOINT = Path("/run") / EXCHANGE_DIR_NAME
 HELP_FLAGS = ("-h", "--help")
 GUEST_USR_LOWER_MOUNTPOINT = Path("/mnt/usr-lower")
 GUEST_USR_OVERLAY_UPPER = Path("/run/usr-overlay/upper")
@@ -147,7 +148,7 @@ DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
 PREPARE_LOCK_FILENAME = "prepare.lock"
 SESSION_LOCK_FILENAME = "session.lock"
-PREPARE_RECIPE_VERSION = 6
+PREPARE_RECIPE_VERSION = 7
 ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 BOOT_TRACE_ENV_VAR = "AGENT_MICROVM_BOOT_TRACE"
 HOST_TRACE_VIRTIOFSD_LAUNCHED = "host:virtiofsd-launched"
@@ -280,7 +281,7 @@ def xdg_directory(env_var: str, fallback: Path) -> Path:
 
 
 def exchange_dir() -> Path:
-    """Return the host directory shared at the same path on every guest."""
+    """Return the host directory shared with every guest."""
     return (
         xdg_directory("XDG_RUNTIME_DIR", Path(tempfile.gettempdir()))
         / EXCHANGE_DIR_NAME
@@ -529,7 +530,6 @@ def write_guest_sudoers(tree: Path) -> None:
 
 def guest_init_script() -> str:
     """Return the shell init script run as PID 1 inside the Alpine guest."""
-    exchange_mountpoint = exchange_dir()
     return f"""#!/bin/sh
 set -u
 
@@ -571,9 +571,9 @@ if mount -t virtiofs {WORKSPACE_SHARE_TAG} {WORKSPACE_MOUNTPOINT}; then
 else
     echo "{SCRIPT_NAME}: WARNING workspace mount failed"
 fi
-mkdir -p {exchange_mountpoint}
-if mount -t virtiofs {EXCHANGE_SHARE_TAG} {exchange_mountpoint}; then
-    echo "{SCRIPT_NAME}: exchange mounted at {exchange_mountpoint}"
+mkdir -p {EXCHANGE_MOUNTPOINT}
+if mount -t virtiofs {EXCHANGE_SHARE_TAG} {EXCHANGE_MOUNTPOINT}; then
+    echo "{SCRIPT_NAME}: exchange mounted at {EXCHANGE_MOUNTPOINT}"
 else
     echo "{SCRIPT_NAME}: WARNING exchange mount failed"
 fi
@@ -1310,8 +1310,9 @@ an interactive bash shell when no COMMAND is given. The guest has root through
 passwordless sudo and is discarded when the session ends.
 
 The current directory is shared read-write at {WORKSPACE_MOUNTPOINT}.
-The exchange directory {exchange_dir()} is shared at the same path on host and
-guest and persists across VMs.
+The exchange directory persists across VMs:
+  {EXCHANGE_MOUNTPOINT} in the guest
+  {exchange_dir()} on the host
 """
 
 

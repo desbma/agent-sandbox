@@ -189,12 +189,13 @@ class MicrovmIntegrationTests(unittest.TestCase):
 
     def test_concurrent_vms_exchange_files(self) -> None:
         """Boot two VMs at once and have each read a file the other wrote."""
-        subdir = agent_microvm.exchange_dir() / f"itest-{uuid.uuid4().hex}"
-        subdir.mkdir(parents=True)
-        self.addCleanup(shutil.rmtree, subdir, ignore_errors=True)
+        host_dir = agent_microvm.exchange_dir() / f"itest-{uuid.uuid4().hex}"
+        host_dir.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, host_dir, ignore_errors=True)
+        guest_dir = agent_microvm.EXCHANGE_MOUNTPOINT / host_dir.name
         commands = [
-            ("sh", "-c", peer_wait_script(subdir / "peer-a", subdir / "peer-b")),
-            ("sh", "-c", peer_wait_script(subdir / "peer-b", subdir / "peer-a")),
+            ("sh", "-c", peer_wait_script(guest_dir / "peer-a", guest_dir / "peer-b")),
+            ("sh", "-c", peer_wait_script(guest_dir / "peer-b", guest_dir / "peer-a")),
         ]
         timeout = GUEST_RUN_TIMEOUT_SECONDS + PEER_WAIT_TIMEOUT_SECONDS
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(commands)) as pool:

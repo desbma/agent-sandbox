@@ -112,7 +112,7 @@ systemctl --user enable --now agent-proxy.service
 - Runs a light Alpine Linux distribution, with common developer packages installed
 - Unprivileged guest user with passwordless `sudo`: real root in the VM, fully isolated from the host
 - Current directory shared read-write at `/home/user/workspace`
-- Persistent exchange directory shared at the same absolute path in guest and host, for artifacts that don't belong in the source tree
+- Persistent exchange directory shared at `/run/agent-microvm-exchange` in the guest, for artifacts that don't belong in the source tree
 - The distribution is transparently rebuilt if needed, to always have up to date packages
 - Supported host distributions: Arch Linux, Debian
 - Uses common tools: `qemu` for virtualization and `passt` for networking

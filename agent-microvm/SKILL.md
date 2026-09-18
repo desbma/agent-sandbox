@@ -65,7 +65,7 @@ The examples below write that path as `<skill-dir>/agent-microvm` — substitute
 
 - **The guest is reset on every invocation.** Nothing installed or written inside the VM survives, except under the shared directories below.
 - The **current directory** is mounted read-write at `/home/user/workspace`. Write results there to keep them on the host.
-- The **exchange directory** `$XDG_RUNTIME_DIR/agent-microvm-exchange` is mounted at the *same absolute path* in guest and host and persists across VMs — use it for artifacts that don't belong in the source tree (logs, captures, images).
+- The **exchange directory** is mounted at `/run/agent-microvm-exchange` in the guest and persists across VMs — use it for artifacts that don't belong in the source tree (logs, captures, images). On the host it lives at `$XDG_RUNTIME_DIR/agent-microvm-exchange`, so read results back from there.
 
 ## Guest facts
 

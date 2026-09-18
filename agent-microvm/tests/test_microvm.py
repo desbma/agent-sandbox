@@ -924,14 +924,23 @@ class MicrovmCommandTests(unittest.TestCase):
         self.assertIn("workspace mount failed", script)
         self.assertIn("poweroff -f", script)
 
-    def test_guest_init_mounts_exchange_at_shared_path(self) -> None:
-        """Generate guest init that mounts the exchange share at the shared host path."""
+    def test_guest_init_mounts_exchange_at_fixed_path(self) -> None:
+        """Generate guest init that mounts the exchange share at the fixed guest path."""
         script = agent_microvm.guest_init_script()
-        mountpoint = agent_microvm.exchange_dir()
+        mountpoint = agent_microvm.EXCHANGE_MOUNTPOINT
 
         self.assertIn(f"mkdir -p {mountpoint}", script)
         self.assertIn(f"mount -t virtiofs exchange {mountpoint}", script)
         self.assertIn("exchange mount failed", script)
+
+    def test_guest_init_ignores_host_runtime_dir(self) -> None:
+        """Generate identical guest init whatever the host runtime directory is."""
+        scripts = []
+        for runtime_dir in ("/run/user/4242", "/tmp/elsewhere"):
+            with unittest.mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime_dir}):
+                scripts.append(agent_microvm.guest_init_script())
+
+        self.assertEqual(scripts[0], scripts[1])
 
     def test_guest_init_restores_sudo_setuid(self) -> None:
         """Generate guest init that restores the sudo setuid bit dropped by rootless apk."""

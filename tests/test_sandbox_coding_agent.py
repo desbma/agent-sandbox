@@ -93,7 +93,7 @@ EMPTY_SANDBOX_FACTS = launcher.SandboxFacts(
 
 
 class TempDirTestCase(unittest.TestCase):
-    """Provide self-cleaning temporary directories and git repositories."""
+    """Test case providing self-cleaning temporary directories and git repositories."""
 
     def make_temp_dir(self) -> Path:
         """Create a self-cleaning temporary directory."""
@@ -155,7 +155,7 @@ class TempDirTestCase(unittest.TestCase):
 
 
 class MountTests(TempDirTestCase):
-    """Test the Mount dataclass."""
+    """Tests of the Mount dataclass."""
 
     def test_target_defaults_to_source(self) -> None:
         """Use the source path as target when no remap is given."""
@@ -227,7 +227,7 @@ class MountTests(TempDirTestCase):
 
 
 class MountKindTests(unittest.TestCase):
-    """Test the mount kind specifications."""
+    """Tests of the mount kind specifications."""
 
     def test_source_policies(self) -> None:
         """Drop a missing host source, except for the read-write binds creating theirs."""
@@ -263,7 +263,7 @@ class MountKindTests(unittest.TestCase):
 
 
 class ResolveMountsTests(unittest.TestCase):
-    """Test mount deduplication, ordering, and launch-dir precedence."""
+    """Tests of mount deduplication, ordering, and launch-dir precedence."""
 
     def test_orders_parents_before_children(self) -> None:
         """Sort mounts so a parent target precedes any nested one."""
@@ -296,7 +296,7 @@ class ResolveMountsTests(unittest.TestCase):
 
 
 class HomeToolsTests(unittest.TestCase):
-    """Test HOME_TOOLS construction from the environment."""
+    """Tests of HOME_TOOLS construction from the environment."""
 
     def test_editor_unset(self) -> None:
         """Build HOME_TOOLS without an editor entry when EDITOR is unset."""
@@ -312,7 +312,7 @@ class HomeToolsTests(unittest.TestCase):
 
 
 class AgentSpecsTests(unittest.TestCase):
-    """Test agent-specific sandbox provisioning."""
+    """Tests of agent-specific sandbox provisioning."""
 
     def test_skill_dirs_are_read_only(self) -> None:
         """Expose the shared skill directory read-only for every supported agent."""
@@ -351,7 +351,7 @@ class AgentSpecsTests(unittest.TestCase):
 
 
 class SessionTmpfsMountsTests(unittest.TestCase):
-    """Test the tmpfs mounts hiding agent session history in scratch mode."""
+    """Tests of the tmpfs mounts hiding agent session history in scratch mode."""
 
     def test_session_dirs_of_known_agents(self) -> None:
         """Point every supported agent at the directory holding its session history."""
@@ -387,7 +387,7 @@ class SessionTmpfsMountsTests(unittest.TestCase):
 
 
 class AuthProfileMountsTests(TempDirTestCase):
-    """Test the credentials mounts selecting an agent's auth profile."""
+    """Tests of the credentials mounts selecting an agent's auth profile."""
 
     def setUp(self) -> None:
         """Build an agent spec whose credentials live in a temporary config directory."""
@@ -682,7 +682,7 @@ class AuthProfileMountsTests(TempDirTestCase):
 
 
 class MemfdDataTests(unittest.TestCase):
-    """Test memfd creation."""
+    """Tests of memfd creation."""
 
     def test_round_trips_data_from_start(self) -> None:
         """Read back the written data from offset zero."""
@@ -693,7 +693,7 @@ class MemfdDataTests(unittest.TestCase):
 
 
 class GenPasswdTests(unittest.TestCase):
-    """Test /etc/passwd generation."""
+    """Tests of /etc/passwd generation."""
 
     def test_current_user_entry_forces_bash(self) -> None:
         """Emit the current user first with the shell forced to bash."""
@@ -727,7 +727,7 @@ class GenPasswdTests(unittest.TestCase):
 
 
 class GenGroupTests(unittest.TestCase):
-    """Test /etc/group generation."""
+    """Tests of /etc/group generation."""
 
     def test_current_group_entry(self) -> None:
         """Emit the current primary group first with its members."""
@@ -758,7 +758,7 @@ class GenGroupTests(unittest.TestCase):
 
 
 class GenGlobalAgentsMdTests(unittest.TestCase):
-    """Test generation of the agent's global instructions file."""
+    """Tests of the generation of the agent's global instructions file."""
 
     def setUp(self) -> None:
         """Ensure the base and per-agent AGENTS.md locations exist and start absent."""
@@ -901,7 +901,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
 
 class ResolveExtraAgentsTests(TempDirTestCase):
-    """Test which always-provisioned agents are added beside the launched one."""
+    """Tests of the always-provisioned agents added beside the launched one."""
 
     @contextlib.contextmanager
     def agents(
@@ -960,7 +960,7 @@ class ResolveExtraAgentsTests(TempDirTestCase):
 
 
 class AgentFilesTests(unittest.TestCase):
-    """Test the per-agent generated config files."""
+    """Tests of the per-agent generated config files."""
 
     def test_codex_config_trusts_the_launch_directory(self) -> None:
         """Trust the launch directory through codex's read-only system config layer."""
@@ -980,7 +980,7 @@ class AgentFilesTests(unittest.TestCase):
 
 
 class ClaudeMemoryEnvTests(TempDirTestCase):
-    """Test the Claude memory override keyed on the jj default workspace."""
+    """Tests of the Claude memory override keyed on the jj default workspace."""
 
     def test_no_override_without_jj_default_workspace(self) -> None:
         """Leave the memory path alone outside a jj repository."""
@@ -1011,7 +1011,7 @@ class ClaudeMemoryEnvTests(TempDirTestCase):
 
 
 class JjWrapperFileTests(TempDirTestCase):
-    """Test provisioning of the read-only jj wrapper."""
+    """Tests of the provisioning of the read-only jj wrapper."""
 
     def test_absent_outside_jj_repo(self) -> None:
         """Provision no jj wrapper when the launch directory is outside a jj repository."""
@@ -1056,7 +1056,7 @@ class JjWrapperFileTests(TempDirTestCase):
 
 
 class ProxyTests(unittest.TestCase):
-    """Test detection of the auth-injecting proxy."""
+    """Tests of the detection of the auth-injecting proxy."""
 
     def test_inactive_without_ca_bundle(self) -> None:
         """Detect no proxy when the CA bundle file is absent."""
@@ -1089,7 +1089,7 @@ class ProxyTests(unittest.TestCase):
 
 
 class ToolPathsTests(TempDirTestCase):
-    """Test the resolution of the host tools to expose."""
+    """Tests of the resolution of the host tools to expose."""
 
     def paths_for(self, tools: list[str], path: Path) -> list[object]:
         """Resolve the given tool names against a single PATH dir."""
@@ -1119,7 +1119,7 @@ class ToolPathsTests(TempDirTestCase):
 
 
 class AlreadyExposedTests(unittest.TestCase):
-    """Test which host paths the sandbox layout shows without a mount of their own."""
+    """Tests of the host paths the sandbox layout shows without a mount of their own."""
 
     def test_under_a_single_mount(self) -> None:
         """Classify a path under one enclosing mount by its source and kind."""
@@ -1163,7 +1163,7 @@ class AlreadyExposedTests(unittest.TestCase):
 
 
 class SandboxDestTests(TempDirTestCase):
-    """Test the translation of host paths through the symlinks the sandbox creates."""
+    """Tests of the translation of host paths through the symlinks the sandbox creates."""
 
     def test_translates_a_path_under_a_link(self) -> None:
         """Translate a path under a sandbox link to the path it resolves to."""
@@ -1189,7 +1189,7 @@ class SandboxDestTests(TempDirTestCase):
 
 
 class BinaryMountTests(TempDirTestCase):
-    """Test the binds making host binaries reachable in the sandbox."""
+    """Tests of the binds making host binaries reachable in the sandbox."""
 
     def layout_of(self, *directories: Path) -> list[object]:
         """Return a layout exposing each directory at its own path."""
@@ -1310,7 +1310,7 @@ class BinaryMountTests(TempDirTestCase):
 
 
 class CargoTargetMountsTests(TempDirTestCase):
-    """Test the cargo target directory overlay."""
+    """Tests of the cargo target directory overlay."""
 
     def mounts_for(self, cwd: Path) -> list[object]:
         """Resolve the cargo target mounts for a launch directory."""
@@ -1338,7 +1338,7 @@ class CargoTargetMountsTests(TempDirTestCase):
 
 
 class AgentBinaryPathsTests(TempDirTestCase):
-    """Test the resolution of the provisioned agents' binaries."""
+    """Tests of the resolution of the provisioned agents' binaries."""
 
     def test_resolves_binaries_and_wrappers(self) -> None:
         """Resolve the launched agent's binary, the extras' binaries, and every wrapper."""
@@ -1361,7 +1361,7 @@ class AgentBinaryPathsTests(TempDirTestCase):
 
 
 class VcsDirsTests(TempDirTestCase):
-    """Test which VCS directories are exposed in the sandbox."""
+    """Tests of the VCS directories exposed in the sandbox."""
 
     def test_launch_dir_dirs_outside_a_known_repo(self) -> None:
         """Expose the launch dir's own VCS dirs when no repository is detected."""
@@ -1408,7 +1408,7 @@ class VcsDirsTests(TempDirTestCase):
 
 
 class ProjectIdentityTests(TempDirTestCase):
-    """Test the identity directory keying the project's shared dirs."""
+    """Tests of the identity directory keying the project's shared dirs."""
 
     def test_cwd_outside_a_repo(self) -> None:
         """Key on the launch dir when it is not in a repository."""
@@ -1437,7 +1437,7 @@ class ProjectIdentityTests(TempDirTestCase):
 
 
 class ParseCpuListTests(unittest.TestCase):
-    """Test sysfs CPU range list expansion."""
+    """Tests of sysfs CPU range list expansion."""
 
     def test_expands_ranges_and_singletons(self) -> None:
         """Expand mixed ranges and single indices into a flat list."""
@@ -1451,7 +1451,7 @@ class ParseCpuListTests(unittest.TestCase):
 
 
 class GenCpuTopologyTests(TempDirTestCase):
-    """Test host CPU topology extraction from sysfs."""
+    """Tests of host CPU topology extraction from sysfs."""
 
     def write_sysfs(self, layout: dict[int, tuple[int, int]]) -> Path:
         """Build a fake /sys/devices/system/cpu tree from a cpu -> (package, core) map."""
@@ -1522,7 +1522,7 @@ class GenCpuTopologyTests(TempDirTestCase):
 
 
 class PromptBoolTests(unittest.TestCase):
-    """Test interactive boolean prompting."""
+    """Tests of interactive boolean prompting."""
 
     def prompt(self, answers: list[str | EOFError], *, default: bool = False) -> bool:
         """Prompt on a fake tty feeding the given input answers."""
@@ -1561,7 +1561,7 @@ class PromptBoolTests(unittest.TestCase):
 
 
 class FatalErrorTests(unittest.TestCase):
-    """Test fatal error reporting."""
+    """Tests of fatal error reporting."""
 
     def test_writes_message_and_exits(self) -> None:
         """Write the prefixed message to stderr and exit with status 1."""
@@ -1577,7 +1577,7 @@ class FatalErrorTests(unittest.TestCase):
 
 
 class ResolveJjTests(TempDirTestCase):
-    """Test resolving the real jj binary past the sandbox wrapper."""
+    """Tests of the resolution of the real jj binary past the sandbox wrapper."""
 
     def make_jj_stub(self, directory: Path) -> Path:
         """Create an executable jj stub in directory and return the directory."""
@@ -1618,7 +1618,7 @@ class ResolveJjTests(TempDirTestCase):
 
 
 class RunCaptureTests(unittest.TestCase):
-    """Test command output capture."""
+    """Tests of command output capture."""
 
     def test_returns_stdout(self) -> None:
         """Return the standard output of a successful command."""
@@ -1634,7 +1634,7 @@ class RunCaptureTests(unittest.TestCase):
 
 
 class GitToplevelTests(TempDirTestCase):
-    """Test git repository toplevel discovery."""
+    """Tests of git repository toplevel discovery."""
 
     def test_returns_toplevel_from_subdir(self) -> None:
         """Find the git toplevel from a nested directory."""
@@ -1652,7 +1652,7 @@ class GitToplevelTests(TempDirTestCase):
 
 
 class JjWorkspacesTests(TempDirTestCase):
-    """Test enumeration of a jj repository's workspaces."""
+    """Tests of the enumeration of a jj repository's workspaces."""
 
     def test_returns_none_outside_repo(self) -> None:
         """Find no workspaces outside any jj repository."""
@@ -1682,7 +1682,7 @@ class JjWorkspacesTests(TempDirTestCase):
 
 
 class QueryRepoInfoTests(TempDirTestCase):
-    """Test single-query VCS layout resolution."""
+    """Tests of single-query VCS layout resolution."""
 
     def test_returns_none_outside_repo(self) -> None:
         """Resolve no layout outside any repository."""
@@ -1727,7 +1727,7 @@ class QueryRepoInfoTests(TempDirTestCase):
 
 
 class SharedWorkspaceRootTests(TempDirTestCase):
-    """Test the exchange root shared across a repository's workspaces."""
+    """Tests of the exchange root shared across a repository's workspaces."""
 
     def build(self, rel_roots: list[str]) -> tuple[Path, list[Path]]:
         """Create the given workspace directories under a fresh base."""
@@ -1813,7 +1813,7 @@ class SharedWorkspaceRootTests(TempDirTestCase):
 
 
 class ScratchModeTests(TempDirTestCase):
-    """Test detection of a throwaway launch directory."""
+    """Tests of the detection of a throwaway launch directory."""
 
     def test_enabled_under_tmp(self) -> None:
         """Enter scratch mode when the launch dir is under /tmp."""
@@ -1829,7 +1829,7 @@ class ScratchModeTests(TempDirTestCase):
 
 
 class ProjectSlugTests(unittest.TestCase):
-    """Test the slug naming the project's shared dirs."""
+    """Tests of the slug naming the project's shared dirs."""
 
     def test_builds_slug_from_last_two_parts(self) -> None:
         """Build the slug from the identity's last two components."""
@@ -1846,7 +1846,7 @@ class ProjectSlugTests(unittest.TestCase):
 
 
 class ClaudePathHashTests(unittest.TestCase):
-    """Test the base36 path hash mirroring Claude Code's slug disambiguation."""
+    """Tests of the base36 path hash mirroring Claude Code's slug disambiguation."""
 
     def test_known_hashes(self) -> None:
         """Reproduce hashes computed by Claude Code's own algorithm."""
@@ -1863,7 +1863,7 @@ class ClaudePathHashTests(unittest.TestCase):
 
 
 class ClaudeProjectSlugTests(unittest.TestCase):
-    """Test the per-project slug encoding mirroring Claude Code's LE()."""
+    """Tests of the per-project slug encoding mirroring Claude Code's LE()."""
 
     def test_replaces_non_alphanumeric_with_dash(self) -> None:
         """Map every non-alphanumeric character to a dash."""
@@ -1886,7 +1886,7 @@ class ClaudeProjectSlugTests(unittest.TestCase):
 
 
 class ClaudeMdSymlinksTests(TempDirTestCase):
-    """Test the CLAUDE.md link pairs derived from the project's AGENTS.md files."""
+    """Tests of the CLAUDE.md link pairs derived from the project's AGENTS.md files."""
 
     def make_agents_md(self, root: Path, relative: str) -> Path:
         """Create an AGENTS.md in a subdirectory of root, creating parents, and return it."""
@@ -1977,7 +1977,7 @@ class ClaudeMdSymlinksTests(TempDirTestCase):
 
 
 class ConfirmCwdTests(TempDirTestCase):
-    """Test startup directory confirmation."""
+    """Tests of startup directory confirmation."""
 
     def test_returns_cwd_outside_repo(self) -> None:
         """Keep the current directory when it is not inside a repository."""

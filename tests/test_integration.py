@@ -122,7 +122,7 @@ class SandboxFixture:
 
 @unittest.skipUnless(INTEGRATION_ENABLED, SKIP_REASON)
 class SandboxTestCase(unittest.TestCase):
-    """Drive real launcher runs against synthetic host environments."""
+    """Test case driving real launcher runs against synthetic host environments."""
 
     def setUp(self) -> None:
         """Create a synthetic home, XDG tree, and project for one launcher run."""
@@ -240,7 +240,7 @@ class SandboxTestCase(unittest.TestCase):
 
 
 class FilesystemTests(SandboxTestCase):
-    """Test the filesystem view inside the sandbox."""
+    """Tests of the filesystem view inside the sandbox."""
 
     def test_home_is_tmpfs(self) -> None:
         """Hide host home content and discard writes to the sandbox home."""
@@ -402,7 +402,7 @@ class FilesystemTests(SandboxTestCase):
 
 
 class GeneratedFileTests(SandboxTestCase):
-    """Test the files the launcher synthesizes inside the sandbox."""
+    """Tests of the files the launcher synthesizes inside the sandbox."""
 
     def test_etc_passwd(self) -> None:
         """Generate a stripped /etc/passwd with the current user forced to bash."""
@@ -534,7 +534,7 @@ class GeneratedFileTests(SandboxTestCase):
 
 
 class EnvironmentTests(SandboxTestCase):
-    """Test environment clearing, setting, and forwarding."""
+    """Tests of environment clearing, setting, and forwarding."""
 
     def test_env_set_cleared_and_forwarded(self) -> None:
         """Clear host env, set the sandbox env, and forward the allowed vars."""
@@ -615,7 +615,7 @@ class EnvironmentTests(SandboxTestCase):
 
 
 class InstructionsTests(SandboxTestCase):
-    """Test the dynamically generated global instructions file."""
+    """Tests of the dynamically generated global instructions file."""
 
     def test_claude_instructions_content(self) -> None:
         """Generate CLAUDE.md from the base file plus the live mount layout."""
@@ -831,7 +831,7 @@ class InstructionsTests(SandboxTestCase):
 
 
 class AgentSpecificTests(SandboxTestCase):
-    """Test per-agent mounts, generated configs, and symlinks."""
+    """Tests of per-agent mounts, generated configs, and symlinks."""
 
     def test_claude_config_round_trips(self) -> None:
         """Expose the claude config read-write at its sandbox locations."""
@@ -1194,7 +1194,7 @@ class AgentSpecificTests(SandboxTestCase):
 
 
 class ScratchModeTests(SandboxTestCase):
-    """Test the throwaway sandbox built for a launch directory under /tmp."""
+    """Tests of the throwaway sandbox built for a launch directory under /tmp."""
 
     def setUp(self) -> None:
         """Add a project under /tmp and a host session history for the claude agent."""
@@ -1322,7 +1322,7 @@ class ScratchModeTests(SandboxTestCase):
 
 
 class LaunchPolicyTests(SandboxTestCase):
-    """Test startup checks and launcher process behavior."""
+    """Tests of startup checks and launcher process behavior."""
 
     def test_refuses_to_start_in_home(self) -> None:
         """Exit with an error when started in the home directory."""

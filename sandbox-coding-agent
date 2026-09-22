@@ -344,31 +344,64 @@ def vcs_dirs(cwd: Path, repo_info: RepoInfo | None) -> list[Path]:
     return [root / subdir for root in roots for subdir in (".git", ".jj")]
 
 
-def agent_binary_mounts(
+def agent_binary_paths(
     agents: collections.abc.Iterable[str], extras: dict[str, Path]
-) -> list[Mount]:
-    """Expose the binary and ~/.local/bin wrapper of every agent provisioned in the sandbox."""
+) -> list[Path]:
+    """Return the binary and ~/.local/bin wrapper of every agent provisioned in the sandbox."""
     entry_bin = shutil.which(sys.argv[1])
     assert entry_bin is not None
-    binaries = [Path(entry_bin), *extras.values()]
-    return [
-        *(Mount(HOME / ".local/bin" / name, MountKind.BIND_RO) for name in agents),
-        *(
-            Mount(binary, MountKind.BIND_RO)
-            for binary in binaries
-            if not binary.is_relative_to("/usr")
-        ),
-    ]
+    wrappers = (HOME / ".local/bin" / name for name in agents)
+    return [*wrappers, Path(entry_bin), *extras.values()]
 
 
-def tool_mounts() -> list[Mount]:
-    """Return the mounts exposing the host tools that live outside /usr."""
+def tool_paths() -> list[Path]:
+    """Return executable paths for the selected host tools that are available."""
     tools = (shutil.which(tool_name) for tool_name in HOME_TOOLS)
-    return [
-        Mount(Path(tool), MountKind.BIND_RO)
-        for tool in tools
-        if (tool is not None) and not Path(tool).is_relative_to("/usr")
-    ]
+    return [Path(tool) for tool in tools if tool is not None]
+
+
+def already_exposed(path: Path, layout: collections.abc.Sequence[Mount]) -> bool:
+    """Tell whether the sandbox layout shows the host path at its own location."""
+    enclosing = [mount for mount in layout if path.is_relative_to(mount.target)]
+    if not enclosing:
+        return False
+    # bwrap applies mounts in order, so the last of the deepest is what the path resolves to
+    deepest = max(reversed(enclosing), key=lambda mount: len(mount.target.parts))
+    return (deepest.kind.spec.source_policy is not SourcePolicy.NO_SOURCE) and (
+        deepest.src == deepest.target
+    )
+
+
+def sandbox_dest(path: Path) -> Path | None:
+    """Return where a sandbox symlink redirects a host path, or None when none does."""
+    for target, link in SYMLINKS.items():
+        if path.is_relative_to(link) and target.exists():
+            return target / path.relative_to(link)
+    return None
+
+
+def binary_mount(binary: Path, layout: collections.abc.Sequence[Mount]) -> Mount | None:
+    """Return a bind for an unexposed path in a host binary's link chain, if one exists."""
+    path = binary
+    seen: set[Path] = set()
+    while path not in seen:
+        seen.add(path)
+        candidate = Mount(path, MountKind.BIND_RO, sandbox_dest(path))
+        if not already_exposed(candidate.target, layout) or (
+            candidate.dst is not None and candidate.target.resolve() != path.resolve()
+        ):
+            return candidate
+        # the layout shows the path, which for a link is only as good as what it points to
+        following = (
+            Path(os.path.normpath(path.parent / path.readlink()))
+            if path.is_symlink()
+            else path.resolve()
+        )
+        if following == path:
+            return None
+        path = following
+    # a cycle of links, which no bind can make resolve
+    return None
 
 
 def cargo_target_mounts() -> list[Mount]:
@@ -1001,22 +1034,26 @@ if __name__ == "__main__":
             ),
         ]
 
-    # static mounts plus every conditional one, deduplicated and ordered for bwrap
-    mounts = resolve_mounts(
-        [
-            *MOUNTS,
-            *(mount for spec in agents.values() for mount in spec.mounts),
-            *auth_profile_mounts(agents, AGENT, args[1:]),
-            *agent_binary_mounts(agents, extras),
-            *shared_dir_mounts,
-            *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),
-            *tool_mounts(),
-            *cargo_target_mounts(),
-            *UNJAIL_MOUNTS,
-            *PROXY_MOUNTS,
-        ],
-        CWD,
-    )
+    # every mount shaping the sandbox filesystem, before the binary probe
+    layout_mounts = [
+        *MOUNTS,
+        *(mount for spec in agents.values() for mount in spec.mounts),
+        *auth_profile_mounts(agents, AGENT, args[1:]),
+        *shared_dir_mounts,
+        *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),
+        *cargo_target_mounts(),
+        *UNJAIL_MOUNTS,
+        *PROXY_MOUNTS,
+    ]
+    layout = resolve_mounts(layout_mounts, CWD)
+    binaries = (*agent_binary_paths(agents, extras), *tool_paths())
+    # binds for the binaries the layout does not already show
+    binary_mounts = [
+        mount
+        for binary in binaries
+        if (mount := binary_mount(binary, layout)) is not None
+    ]
+    mounts = resolve_mounts([*layout, *binary_mounts], CWD)
 
     dir_mounts: dict[MountKind, list[Path]] = collections.defaultdict(list)
     for mount in mounts:

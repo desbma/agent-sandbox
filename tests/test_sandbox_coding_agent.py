@@ -1088,44 +1088,225 @@ class ProxyTests(unittest.TestCase):
         )
 
 
-class ToolMountsTests(TempDirTestCase):
-    """Test the mounts exposing host tools."""
+class ToolPathsTests(TempDirTestCase):
+    """Test the resolution of the host tools to expose."""
 
-    def mounts_for(self, tools: list[str], path: Path) -> list[object]:
-        """Resolve the tool mounts for the given tool names against a single PATH dir."""
+    def paths_for(self, tools: list[str], path: Path) -> list[object]:
+        """Resolve the given tool names against a single PATH dir."""
         with (
             unittest.mock.patch.object(launcher, "HOME_TOOLS", tools),
             unittest.mock.patch.dict(os.environ, {"PATH": str(path)}),
         ):
-            return launcher.tool_mounts()
+            return launcher.tool_paths()
 
-    def test_exposes_tool_outside_usr(self) -> None:
-        """Bind a tool resolved outside /usr read-only at its own path."""
+    def test_resolves_tool_on_path(self) -> None:
+        """Resolve a tool named on PATH to its own path."""
         base = self.make_temp_dir()
         tool = self.make_executable(base / "mytool")
 
-        self.assertEqual(
-            self.mounts_for(["mytool"], base),
-            [launcher.Mount(tool, launcher.MountKind.BIND_RO)],
-        )
+        self.assertEqual(self.paths_for(["mytool"], base), [tool])
 
     def test_accepts_absolute_tool_path(self) -> None:
-        """Bind a tool given as an absolute path, as EDITOR may be."""
+        """Accept a tool given as an absolute path, as EDITOR may be."""
         base = self.make_temp_dir()
         tool = self.make_executable(base / "mytool")
 
-        self.assertEqual(
-            self.mounts_for([str(tool)], self.make_temp_dir()),
-            [launcher.Mount(tool, launcher.MountKind.BIND_RO)],
-        )
-
-    def test_skips_tool_under_usr(self) -> None:
-        """Skip a tool already exposed by the read-only /usr bind."""
-        self.assertEqual(self.mounts_for(["env"], Path("/usr/bin")), [])
+        self.assertEqual(self.paths_for([str(tool)], self.make_temp_dir()), [tool])
 
     def test_skips_missing_tool(self) -> None:
         """Skip a tool that is not installed."""
-        self.assertEqual(self.mounts_for(["mytool"], self.make_temp_dir()), [])
+        self.assertEqual(self.paths_for(["mytool"], self.make_temp_dir()), [])
+
+
+class AlreadyExposedTests(unittest.TestCase):
+    """Test which host paths the sandbox layout shows without a mount of their own."""
+
+    def test_under_a_single_mount(self) -> None:
+        """Classify a path under one enclosing mount by its source and kind."""
+        cases = (
+            (launcher.MountKind.BIND_RO, None, True),
+            (launcher.MountKind.BIND_RW, None, True),
+            (launcher.MountKind.OVERLAYFS, None, True),
+            (launcher.MountKind.TMPFS, None, False),
+            (launcher.MountKind.BIND_RO, Path("/elsewhere"), False),
+        )
+        for kind, dst, exposed in cases:
+            mount = launcher.Mount(Path("/source"), kind, dst)
+            with self.subTest(kind=kind, dst=dst):
+                self.assertEqual(
+                    launcher.already_exposed(mount.target / "tool", [mount]), exposed
+                )
+
+    def test_without_an_enclosing_mount(self) -> None:
+        """Expose nothing when no mount covers the path."""
+        mounts = [launcher.Mount(Path("/usr"), launcher.MountKind.BIND_RO)]
+
+        self.assertFalse(launcher.already_exposed(Path("/opt/tool"), mounts))
+
+    def test_deepest_mount_decides(self) -> None:
+        """Follow the deepest mount, the one bwrap leaves visible at the path."""
+        mounts = [
+            launcher.Mount(Path("/usr"), launcher.MountKind.BIND_RO),
+            launcher.Mount(Path("/usr/local"), launcher.MountKind.TMPFS),
+        ]
+
+        self.assertFalse(launcher.already_exposed(Path("/usr/local/bin/tool"), mounts))
+
+    def test_last_of_equally_deep_mounts_decides(self) -> None:
+        """Follow the last of two mounts on the same target, the one bwrap applies last."""
+        mounts = [
+            launcher.Mount(Path("/tmp"), launcher.MountKind.TMPFS),
+            launcher.Mount(Path("/tmp"), launcher.MountKind.BIND_RW),
+        ]
+
+        self.assertTrue(launcher.already_exposed(Path("/tmp/tool"), mounts))
+
+
+class SandboxDestTests(TempDirTestCase):
+    """Test the translation of host paths through the symlinks the sandbox creates."""
+
+    def test_translates_a_path_under_a_link(self) -> None:
+        """Translate a path under a sandbox link to the path it resolves to."""
+        with unittest.mock.patch.object(
+            launcher, "SYMLINKS", {Path("/usr/bin"): Path("/bin")}
+        ):
+            self.assertEqual(
+                launcher.sandbox_dest(Path("/bin/vi")), Path("/usr/bin/vi")
+            )
+
+    def test_leaves_an_unlinked_path_alone(self) -> None:
+        """Translate nothing for a path no sandbox link covers."""
+        with unittest.mock.patch.object(
+            launcher, "SYMLINKS", {Path("/usr/bin"): Path("/bin")}
+        ):
+            self.assertIsNone(launcher.sandbox_dest(Path("/opt/vi")))
+
+    def test_ignores_a_link_the_sandbox_skips(self) -> None:
+        """Translate nothing through a link the launcher drops for a missing target."""
+        missing = self.make_temp_dir() / "absent"
+        with unittest.mock.patch.object(launcher, "SYMLINKS", {missing: Path("/bin")}):
+            self.assertIsNone(launcher.sandbox_dest(Path("/bin/vi")))
+
+
+class BinaryMountTests(TempDirTestCase):
+    """Test the binds making host binaries reachable in the sandbox."""
+
+    def layout_of(self, *directories: Path) -> list[object]:
+        """Return a layout exposing each directory at its own path."""
+        return [
+            launcher.Mount(directory, launcher.MountKind.BIND_RW)
+            for directory in directories
+        ]
+
+    def test_binds_a_binary_the_layout_hides(self) -> None:
+        """Bind a binary at its own path when no mount shows it."""
+        binary = self.make_executable(self.make_temp_dir() / "tool")
+
+        self.assertEqual(
+            launcher.binary_mount(binary, []),
+            launcher.Mount(binary, launcher.MountKind.BIND_RO),
+        )
+
+    def test_skips_a_binary_the_layout_shows(self) -> None:
+        """Bind nothing for a plain binary a mount already shows."""
+        shown = self.make_temp_dir()
+        binary = self.make_executable(shown / "tool")
+
+        self.assertIsNone(launcher.binary_mount(binary, self.layout_of(shown)))
+
+    def test_binds_the_relative_target_of_a_shown_link(self) -> None:
+        """Bind the unexposed target of a shown relative symlink."""
+        shown, hidden = self.make_temp_dir(), self.make_temp_dir()
+        target = self.make_executable(hidden / "real")
+        link = shown / "tool"
+        link.symlink_to(os.path.relpath(target, link.parent))
+
+        self.assertEqual(
+            launcher.binary_mount(link, self.layout_of(shown)),
+            launcher.Mount(target, launcher.MountKind.BIND_RO),
+        )
+
+    def test_binds_a_hidden_link_of_a_shown_chain(self) -> None:
+        """Bind the first hidden link of a chain, even when its own target is shown."""
+        shown, hidden = self.make_temp_dir(), self.make_temp_dir()
+        target = self.make_executable(shown / "real")
+        middle = hidden / "middle"
+        middle.symlink_to(target)
+        link = shown / "tool"
+        link.symlink_to(middle)
+
+        self.assertEqual(
+            launcher.binary_mount(link, self.layout_of(shown)),
+            launcher.Mount(middle, launcher.MountKind.BIND_RO),
+        )
+
+    def test_skips_a_link_resolving_inside_the_sandbox(self) -> None:
+        """Bind nothing for a shown symlink whose target the layout shows too."""
+        shown = self.make_temp_dir()
+        target = self.make_executable(shown / "real")
+        link = shown / "tool"
+        link.symlink_to(target)
+
+        self.assertIsNone(launcher.binary_mount(link, self.layout_of(shown)))
+
+    def test_binds_a_binary_behind_a_shown_directory_link(self) -> None:
+        """Bind the resolved binary when a shown directory link hides it."""
+        shown, hidden = self.make_temp_dir(), self.make_temp_dir()
+        binary = self.make_executable(hidden / "tool")
+        (shown / "bin").symlink_to(hidden)
+
+        self.assertEqual(
+            launcher.binary_mount(shown / "bin/tool", self.layout_of(shown)),
+            launcher.Mount(binary, launcher.MountKind.BIND_RO),
+        )
+
+    def test_skips_a_binary_shown_through_a_sandbox_link(self) -> None:
+        """Bind nothing for a binary a sandbox link redirects to the same file."""
+        shown = self.make_temp_dir()
+        alias = self.make_temp_dir()
+        self.make_executable(shown / "tool")
+        (alias / "tool").symlink_to(shown / "tool")
+
+        with unittest.mock.patch.object(launcher, "SYMLINKS", {shown: alias}):
+            self.assertIsNone(
+                launcher.binary_mount(alias / "tool", self.layout_of(shown))
+            )
+
+    def test_binds_a_binary_a_sandbox_link_redirects_elsewhere(self) -> None:
+        """Bind at the translated path when the sandbox link leads to another file."""
+        shown = self.make_temp_dir()
+        alias = self.make_temp_dir()
+        self.make_executable(shown / "tool")
+        binary = self.make_executable(alias / "tool")
+
+        with unittest.mock.patch.object(launcher, "SYMLINKS", {shown: alias}):
+            self.assertEqual(
+                launcher.binary_mount(binary, self.layout_of(shown)),
+                launcher.Mount(binary, launcher.MountKind.BIND_RO, shown / "tool"),
+            )
+
+    def test_translates_a_link_target_through_a_sandbox_link(self) -> None:
+        """Translate every target reached while following a shown link."""
+        shown, target = self.make_temp_dir(), self.make_temp_dir()
+        alias = self.make_temp_dir()
+        self.make_executable(target / "tool")
+        binary = self.make_executable(alias / "tool")
+        wrapper = shown / "wrapper"
+        wrapper.symlink_to(binary)
+
+        with unittest.mock.patch.object(launcher, "SYMLINKS", {target: alias}):
+            self.assertEqual(
+                launcher.binary_mount(wrapper, self.layout_of(shown, target)),
+                launcher.Mount(binary, launcher.MountKind.BIND_RO, target / "tool"),
+            )
+
+    def test_gives_up_on_a_cycle_of_links(self) -> None:
+        """Bind nothing for shown links pointing at each other."""
+        shown = self.make_temp_dir()
+        (shown / "a").symlink_to(shown / "b")
+        (shown / "b").symlink_to(shown / "a")
+
+        self.assertIsNone(launcher.binary_mount(shown / "a", self.layout_of(shown)))
 
 
 class CargoTargetMountsTests(TempDirTestCase):
@@ -1156,38 +1337,26 @@ class CargoTargetMountsTests(TempDirTestCase):
         self.assertFalse((cwd / "target").exists())
 
 
-class AgentBinaryMountsTests(TempDirTestCase):
-    """Test the mounts exposing the provisioned agents' binaries."""
+class AgentBinaryPathsTests(TempDirTestCase):
+    """Test the resolution of the provisioned agents' binaries."""
 
-    def test_binds_binaries_and_wrappers(self) -> None:
-        """Bind the launched agent's binary, the extras' binaries, and every wrapper."""
+    def test_resolves_binaries_and_wrappers(self) -> None:
+        """Resolve the launched agent's binary, the extras' binaries, and every wrapper."""
         base = self.make_temp_dir()
         claude_bin = self.make_executable(base / "claude")
         pi_bin = self.make_executable(base / "pi")
 
         with unittest.mock.patch.object(sys, "argv", ["launcher", str(claude_bin)]):
-            mounts = launcher.agent_binary_mounts(["claude", "pi"], {"pi": pi_bin})
+            paths = launcher.agent_binary_paths(["claude", "pi"], {"pi": pi_bin})
 
         self.assertEqual(
-            mounts,
+            paths,
             [
-                launcher.Mount(
-                    FAKE_HOME / ".local/bin/claude", launcher.MountKind.BIND_RO
-                ),
-                launcher.Mount(FAKE_HOME / ".local/bin/pi", launcher.MountKind.BIND_RO),
-                launcher.Mount(claude_bin, launcher.MountKind.BIND_RO),
-                launcher.Mount(pi_bin, launcher.MountKind.BIND_RO),
+                FAKE_HOME / ".local/bin/claude",
+                FAKE_HOME / ".local/bin/pi",
+                claude_bin,
+                pi_bin,
             ],
-        )
-
-    def test_skips_binary_under_usr(self) -> None:
-        """Skip an agent binary already exposed by the read-only /usr bind."""
-        with unittest.mock.patch.object(sys, "argv", ["launcher", "/usr/bin/env"]):
-            mounts = launcher.agent_binary_mounts(["env"], {})
-
-        self.assertEqual(
-            mounts,
-            [launcher.Mount(FAKE_HOME / ".local/bin/env", launcher.MountKind.BIND_RO)],
         )
 
 

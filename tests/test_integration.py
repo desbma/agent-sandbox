@@ -160,6 +160,13 @@ class SandboxTestCase(unittest.TestCase):
         assert git is not None
         (self.fixture.tools_dir / "git").symlink_to(git)
 
+    def make_executable(self, path: Path) -> Path:
+        """Create an executable shell stub at path and return it."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(EXECUTABLE_STUB)
+        path.chmod(0o755)
+        return path
+
     def make_project_jj_repo(self) -> None:
         """Turn the fixture project into a jj repository, with jj reachable from the launcher."""
         assert JJ_BIN is not None
@@ -671,10 +678,7 @@ class InstructionsTests(SandboxTestCase):
 
     def test_instructions_of_extra_agent_use_its_own_file(self) -> None:
         """Give an always-provisioned extra agent its own instructions file, not the launched one's."""
-        pi = self.fixture.home / ".local/libexec/pi/pi"
-        pi.parent.mkdir(parents=True)
-        pi.write_text(EXECUTABLE_STUB)
-        pi.chmod(0o755)
+        self.make_executable(self.fixture.home / ".local/libexec/pi/pi")
         (self.fixture.config_home / "agents/AGENTS.claude.md").write_text(
             AGENT_INSTRUCTIONS
         )
@@ -805,9 +809,7 @@ class InstructionsTests(SandboxTestCase):
     def test_unjail_tools_expose_xdg_open(self) -> None:
         """Expose xdg-open in the sandbox when the unjail tools are on PATH."""
         for name in ("unjail-xdg-open", "unjail"):
-            tool = self.fixture.tools_dir / name
-            tool.write_text(EXECUTABLE_STUB)
-            tool.chmod(0o755)
+            self.make_executable(self.fixture.tools_dir / name)
         unjaild_socket = self.fixture.runtime_dir / "unjaild/xdg-open"
         unjaild_socket.parent.mkdir()
         unjaild_socket.touch()
@@ -920,10 +922,7 @@ class AgentSpecificTests(SandboxTestCase):
 
     def test_auth_profile_applies_to_extra_agent(self) -> None:
         """Select the profile credentials of an always-provisioned extra agent."""
-        pi = self.fixture.home / ".local/libexec/pi/pi"
-        pi.parent.mkdir(parents=True)
-        pi.write_text(EXECUTABLE_STUB)
-        pi.chmod(0o755)
+        self.make_executable(self.fixture.home / ".local/libexec/pi/pi")
         credentials = self.fixture.config_home / "pi/agent/auth.json"
         credentials.parent.mkdir(parents=True)
         credentials.write_text('{"token": "default"}')
@@ -1089,10 +1088,9 @@ class AgentSpecificTests(SandboxTestCase):
 
     def test_codex_code_mode_host_stays_executable(self) -> None:
         """Expose the codex code-mode host helper executable beside the codex binary."""
-        helper = self.fixture.home / ".local/libexec/codex-code-mode-host"
-        helper.parent.mkdir(parents=True)
-        helper.write_text(EXECUTABLE_STUB)
-        helper.chmod(0o755)
+        helper = self.make_executable(
+            self.fixture.home / ".local/libexec/codex-code-mode-host"
+        )
 
         report = self.run_probe(
             [Op("helper_executable", OpKind.ACCESS_X, helper)],
@@ -1268,10 +1266,7 @@ class ScratchModeTests(SandboxTestCase):
 
     def test_extra_agent_session_dir_isolated(self) -> None:
         """Hide the session history of an always-provisioned extra agent too."""
-        pi = self.fixture.home / ".local/libexec/pi/pi"
-        pi.parent.mkdir(parents=True)
-        pi.write_text(EXECUTABLE_STUB)
-        pi.chmod(0o755)
+        self.make_executable(self.fixture.home / ".local/libexec/pi/pi")
         host_dir, sandbox_dir = self.session_dirs()["pi"]
         self.plant_host_session(host_dir)
 
@@ -1361,9 +1356,7 @@ class LaunchPolicyTests(SandboxTestCase):
     def test_home_tools_and_editor_are_mounted(self) -> None:
         """Bind PATH-resolved home tools and an absolute EDITOR into the sandbox."""
         for name in ("uv", "fake-editor"):
-            tool = self.fixture.tools_dir / name
-            tool.write_text(EXECUTABLE_STUB)
-            tool.chmod(0o755)
+            self.make_executable(self.fixture.tools_dir / name)
         editor = self.fixture.tools_dir / "fake-editor"
 
         report = self.run_probe(
@@ -1376,6 +1369,31 @@ class LaunchPolicyTests(SandboxTestCase):
         )
 
         self.assertEqual(report["uv"], True)
+        self.assertEqual(report["editor"], True)
+
+    def test_symlinked_tool_in_the_launch_dir(self) -> None:
+        """Expose a launch-directory tool with an unexposed symlink target."""
+        target = self.make_executable(self.fixture.root / "opt/real-editor")
+        editor = self.fixture.tools_dir / "fake-editor"
+        editor.symlink_to(target)
+
+        report = self.run_probe(
+            [Op("editor", OpKind.ACCESS_X, editor)],
+            agent="claude",
+            extra_env={"EDITOR": str(editor)},
+            cwd=self.fixture.tools_dir,
+        )
+
+        self.assertEqual(report["editor"], True)
+
+    def test_tool_under_a_sandbox_symlink(self) -> None:
+        """Expose an absolute tool path through the sandbox's /bin alias."""
+        report = self.run_probe(
+            [Op("editor", OpKind.ACCESS_X, Path("/bin/sh"))],
+            agent="claude",
+            extra_env={"EDITOR": "/bin/sh"},
+        )
+
         self.assertEqual(report["editor"], True)
 
     def test_debug_mode_prints_bwrap_command(self) -> None:

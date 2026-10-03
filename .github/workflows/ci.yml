@@ -55,11 +55,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap=$(nix build --no-link --print-out-paths "$NIXPKGS#bubblewrap")/bin/bwrap
           jj=$(nix build --no-link --print-out-paths "$NIXPKGS#jujutsu")/bin/jj
+          mitmdump=$(nix build --no-link --print-out-paths "$NIXPKGS#mitmproxy")/bin/mitmdump
           sudo ln -sf "$bwrap" /usr/bin/bwrap
           sudo ln -sf "$jj" /usr/bin/jj
+          sudo ln -sf "$mitmdump" /usr/bin/mitmdump
       - run: python3 -m unittest discover -s tests -v
         env:
           SANDBOX_CODING_AGENT_INTEGRATION: "1"
+          AGENT_PROXY_INTEGRATION: "1"
       - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" --command python3 -m unittest tests.test_integration -v
         working-directory: agent-microvm
         env:

@@ -7,7 +7,7 @@ Tooling to run coding agents (Claude Code, Codex, Amp, hax, pi) inside tight, di
 
 The two compose: an agent normally lives in the bwrap sandbox and reaches for the microVM only when it needs privileges the sandbox withholds. Because the microVM runs inside the bwrap sandbox, everything stays doubly contained and is discarded on exit.
 
-Alongside these, **`agent-proxy/`** is an optional host-side [mitmproxy](https://mitmproxy.org/) user service: it injects a real GitHub token into `gh`'s requests to `api.github.com` so the agent can use the GitHub API without the sandbox ever holding the token. When the service is running, `sandbox-coding-agent` routes `gh` through it; README covers setup.
+Alongside these, **`agent-proxy/`** is an optional host-side [mitmproxy](https://mitmproxy.org/) user service: it injects a real GitHub token into `gh`'s requests to `api.github.com` so the agent can use the GitHub API without the sandbox ever holding the token. When the service is running, `sandbox-coding-agent` sets `HTTPS_PROXY` for the whole sandbox, so the proxy carries all of the sandbox's HTTPS traffic: it intercepts `api.github.com` and tunnels every other host as raw TCP. It bounds how long a tunnel outlives a silently dead upstream connection (ie. across a laptop suspend) by enabling TCP keepalive and `TCP_USER_TIMEOUT` on upstream sockets. mitmproxy exposes no option or hook reaching those sockets, so the module's `load` hook wraps `asyncio.open_connection`, which mitmproxy looks up at call time; only the integration test below catches a mitmproxy release that bypasses the wrapper. README covers setup.
 
 ## Code Style
 
@@ -45,11 +45,17 @@ ruff format --check
 ty check
 ```
 
-The two extensionless launcher scripts (`sandbox-coding-agent` and `agent-microvm/agent-microvm`) are pulled into both tools' file discovery (ruff `extend-include`, ty `src.include`); directory traversal would otherwise skip them. `sandbox-coding-agent` is covered by the root `tests/` directory: a unit suite that loads the launcher script as a module, and an opt-in integration suite that starts real bubblewrap sandboxes against synthetic home/XDG trees (needs a working `bwrap` and `/dev/kvm`). From the repository root:
+The extensionless scripts (`sandbox-coding-agent`, `agent-microvm/agent-microvm` and `agent-proxy/agent-proxy`) are pulled into both tools' file discovery (ruff `extend-include`, ty `src.include`); directory traversal would otherwise skip them. `sandbox-coding-agent` is covered by the root `tests/` directory: a unit suite that loads the launcher script as a module, and an opt-in integration suite that starts real bubblewrap sandboxes against synthetic home/XDG trees (needs a working `bwrap` and `/dev/kvm`). From the repository root:
 
 ```sh
 python3 -m unittest discover -s tests
 SANDBOX_CODING_AGENT_INTEGRATION=1 python3 -m unittest discover -s tests
+```
+
+`agent-proxy` is covered by the same directory: a unit test of its upstream socket options, and an opt-in integration suite that runs the real proxy in a private user and network namespace and checks that a silent tunnel stays open while its upstream lives but closes once netem silently drops its upstream packets (needs `mitmdump`, iproute2, the kernel's netem qdisc and unprivileged user namespaces; takes about three and a half minutes). From the repository root:
+
+```sh
+AGENT_PROXY_INTEGRATION=1 python3 -m unittest discover -s tests -p test_agent_proxy.py
 ```
 
 `agent-microvm` adds a unit suite that must also pass without `sudo`, and an opt-in VM-booting integration suite that needs outbound network. From `agent-microvm/`:

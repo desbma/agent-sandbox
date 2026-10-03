@@ -57,7 +57,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 - Applies per-agent quality of life fixes: Codex CLI trusts the launch directory instead of prompting about it, Pi keeps its extension modules in its own state directory, etc.
 - Safeguards against accidental launches from the wrong directory: the home directory is rejected, and a repository subdirectory offers to switch to the repository root
 - Exposes `/dev/kvm` and the host CPU topology, so the agent can run nested VMs with a matching core layout and pinned vCPUs: this is what lets `agent-microvm` work from inside the sandbox
-- Optionally routes `gh` through [`agent-proxy`](#agent-proxy), so the GitHub API works inside the sandbox without ever exposing the token to the agent
+- Optionally routes HTTPS traffic through [`agent-proxy`](#agent-proxy), so `gh` reaches the GitHub API inside the sandbox without ever exposing the token to the agent
 
 **Network isolation is out of scope: the agent has access to the same network as the host.**
 
@@ -86,7 +86,8 @@ Replace `/usr/bin/claude` by the location of the main Claude Code binary. Use `~
 
 ## `agent-proxy`
 
-An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets `gh` reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher injects the env vars that point `gh` at it.
+An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets `gh` reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher sets `HTTPS_PROXY` for the whole sandbox, so the traffic of every HTTPS client that honors it goes through the proxy: requests to `api.github.com` are intercepted, other hosts are tunneled untouched.
+The proxy also enables TCP keepalive and a timeout for unacknowledged data on its upstream connections, so a client whose connection's network path silently died, typically across a laptop suspend, gets an error instead of hanging.
 
 Setup, on the host:
 

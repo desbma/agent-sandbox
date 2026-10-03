@@ -1,6 +1,6 @@
 # agent-sandbox
 
-Tooling to run coding agents (Claude Code, Codex, Amp, pi) inside tight, disposable sandboxes on the host, without ever needing `sudo`. Two layers are assembled here and used together:
+Tooling to run coding agents (Claude Code, Codex, Amp, hax, pi) inside tight, disposable sandboxes on the host, without ever needing `sudo`. Two layers are assembled here and used together:
 
 - **`sandbox-coding-agent`** (repository root) — the default host boundary. A Bubblewrap launcher that starts an agent in a locked-down namespace: the home directory and most of `/etc` are replaced by tmpfs or read-only binds, the working directory and a few caches are the only writable host paths, and the agent's global instructions are assembled from the user's base file, an optional agent specific one, and a generated sandbox-specific section. It also exposes `/dev/kvm` so the inner microVM can boot.
 - **`agent-microvm/`** — an escalation path for tasks the bwrap sandbox denies (real root, mounting images, low-level networking, privileged services). It boots a throwaway, root-capable Alpine microVM via rootless QEMU, nested inside the bwrap sandbox, and is also packaged as the `agent-microvm` Claude skill. Its design intent lives in the [agent-microvm component](#agent-microvm-component) section below; `agent-microvm/SKILL.md` covers usage.

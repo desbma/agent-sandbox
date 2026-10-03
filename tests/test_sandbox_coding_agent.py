@@ -314,20 +314,25 @@ class HomeToolsTests(unittest.TestCase):
 class AgentSpecsTests(unittest.TestCase):
     """Tests of agent-specific sandbox provisioning."""
 
-    def test_skill_dirs_are_read_only(self) -> None:
-        """Expose the shared skill directory read-only for every supported agent."""
+    def test_skill_dirs_of_known_agents(self) -> None:
+        """Expose the shared skill directory read-only where every supported agent reads it."""
         skill_dir = FAKE_CONFIG_HOME / "agents/skills"
 
-        skill_mounts = [
-            mount
-            for spec in launcher.AGENTS.values()
-            for mount in spec.mounts
-            if mount.src == skill_dir
-        ]
-
-        self.assertEqual(len(skill_mounts), len(launcher.AGENTS))
-        self.assertTrue(
-            all(mount.kind is launcher.MountKind.BIND_RO for mount in skill_mounts)
+        self.assertEqual(
+            {
+                name: [mount for mount in spec.mounts if mount.src == skill_dir]
+                for name, spec in launcher.AGENTS.items()
+            },
+            {
+                name: [launcher.Mount(skill_dir, launcher.MountKind.BIND_RO, dst)]
+                for name, dst in {
+                    "amp": FAKE_HOME / ".config/agents/skills",
+                    "claude": FAKE_HOME / ".claude/skills",
+                    "codex": FAKE_HOME / ".agents/skills",
+                    "hax": FAKE_HOME / ".agents/skills",
+                    "pi": FAKE_HOME / ".agents/skills",
+                }.items()
+            },
         )
 
     def test_codex_code_mode_host_is_exposed(self) -> None:
@@ -361,6 +366,7 @@ class SessionTmpfsMountsTests(unittest.TestCase):
                 "amp": FAKE_HOME / ".local/share/amp/threads",
                 "claude": FAKE_HOME / ".claude/projects",
                 "codex": FAKE_HOME / ".codex/sessions",
+                "hax": FAKE_HOME / ".local/state/hax/sessions",
                 "pi": FAKE_HOME / ".pi/agent/sessions",
             },
         )
@@ -475,6 +481,7 @@ class AuthProfileMountsTests(TempDirTestCase):
                     launcher.MountKind.BIND_RW,
                     FAKE_HOME / ".codex/auth.json",
                 ),
+                "hax": None,
                 "pi": launcher.Mount(
                     FAKE_CONFIG_HOME / "pi/agent/auth.json",
                     launcher.MountKind.BIND_RW,
@@ -572,7 +579,13 @@ class AuthProfileMountsTests(TempDirTestCase):
         """Name a login command for the agents that refuse to start on empty credentials."""
         self.assertEqual(
             {name: spec.login_args for name, spec in launcher.AGENTS.items()},
-            {"amp": None, "claude": None, "codex": ("login",), "pi": None},
+            {
+                "amp": None,
+                "claude": None,
+                "codex": ("login",),
+                "hax": None,
+                "pi": None,
+            },
         )
 
     def test_refuses_to_start_the_launched_agent_on_an_empty_profile(self) -> None:

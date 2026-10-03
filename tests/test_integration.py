@@ -1148,6 +1148,49 @@ class AgentSpecificTests(SandboxTestCase):
         # created as mount point leaks to the bind-mounted host config dir
         self.assertEqual((self.fixture.config_home / "amp/AGENTS.md").read_text(), "")
 
+    def test_hax_dirs_round_trip(self) -> None:
+        """Expose the hax config, state and cache dirs read-write at their locations."""
+        report = self.run_probe(
+            [
+                Op(
+                    "config_write",
+                    OpKind.RENAME_OVER,
+                    self.fixture.home / ".config/hax/config.json",
+                ),
+                Op(
+                    "state_write",
+                    OpKind.RENAME_OVER,
+                    self.fixture.home / ".local/state/hax/auth.json",
+                ),
+                Op(
+                    "cache_write",
+                    OpKind.WRITE,
+                    self.fixture.home / ".cache/hax/catalog.json",
+                ),
+                Op(
+                    "agents_md",
+                    OpKind.READ,
+                    self.fixture.home / ".config/hax/AGENTS.md",
+                ),
+            ],
+            agent="hax",
+        )
+
+        # hax replaces its config and credentials with a staged file
+        self.assertEqual(report["config_write"], "ok")
+        self.assertEqual(report["state_write"], "ok")
+        self.assertEqual(report["cache_write"], "ok")
+        self.assertIn("## Sandbox environment", self.report_str(report, "agents_md"))
+        self.assertEqual(
+            (self.fixture.config_home / "hax/config.json").read_text(), "canary"
+        )
+        self.assertEqual(
+            (self.fixture.state_home / "hax/auth.json").read_text(), "canary"
+        )
+        self.assertEqual(
+            (self.fixture.cache_home / "hax/catalog.json").read_text(), "canary"
+        )
+
     def test_launch_inside_skill_dir_stays_writable(self) -> None:
         """Keep the launch dir writable when it is the agent's read-only skill dir."""
         (self.fixture.config_home / "agents/skills").mkdir(parents=True)
@@ -1215,6 +1258,10 @@ class ScratchModeTests(SandboxTestCase):
             "codex": (
                 self.fixture.config_home / "codex/sessions",
                 self.fixture.home / ".codex/sessions",
+            ),
+            "hax": (
+                self.fixture.state_home / "hax/sessions",
+                self.fixture.home / ".local/state/hax/sessions",
             ),
             "pi": (
                 self.fixture.config_home / "pi/agent/sessions",

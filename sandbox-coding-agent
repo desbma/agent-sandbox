@@ -906,6 +906,20 @@ AGENTS: dict[str, AgentSpec] = {
             )
         },
     ),
+    "hax": AgentSpec(
+        agents_md=HOME / ".config/hax/AGENTS.md",
+        session_dir=HOME / ".local/state/hax/sessions",
+        mounts=(
+            Mount(
+                XDG_CONFIG_HOME / "agents/skills",
+                MountKind.BIND_RO,
+                HOME / ".agents/skills",
+            ),
+            Mount(XDG_CACHE_HOME / "hax", MountKind.BIND_RW, HOME / ".cache/hax"),
+            Mount(XDG_CONFIG_HOME / "hax", MountKind.BIND_RW, HOME / ".config/hax"),
+            Mount(XDG_STATE_HOME / "hax", MountKind.BIND_RW, HOME / ".local/state/hax"),
+        ),
+    ),
     "pi": AgentSpec(
         agents_md=HOME / ".pi/agent/AGENTS.md",
         session_dir=HOME / ".pi/agent/sessions",

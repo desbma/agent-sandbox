@@ -32,7 +32,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 
 ### Features
 
-- Supported agents: Amp, Claude Code, Codex CLI, Pi
+- Supported agents: Amp, Claude Code, Codex CLI, hax, Pi
 - Startup overhead <30ms
 - Unshares all namespaces except network: the agent can not access processes, devices, users, etc. outside of its sandbox
 - Builds filesystem namespace tailored for the agent:

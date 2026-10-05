@@ -356,6 +356,21 @@ class FilesystemTests(SandboxTestCase):
         self.assertFalse((cargo_home / "added.txt").exists())
         self.assertFalse((venv / "added.txt").exists())
 
+    def test_link_at_mount_target_aborts_launch(self) -> None:
+        """Abort the launch when a project mount target links to the host ~/.ssh."""
+        ssh = self.fixture.home / ".ssh"
+        ssh.mkdir()
+        for name in (".venv", ".git"):
+            with self.subTest(name=name):
+                link = self.fixture.project_dir / name
+                link.symlink_to(ssh)
+
+                result = self.run_launcher(agent="claude")
+                link.unlink()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(str(link), result.stderr)
+
     def test_cargo_target_dir_is_shared_overlay(self) -> None:
         """Expose the host Cargo target directory but keep writes out of it."""
         (self.fixture.project_dir / "Cargo.toml").write_text('[package]\nname = "x"\n')

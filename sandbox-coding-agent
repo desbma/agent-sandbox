@@ -761,6 +761,7 @@ MOUNTS: list[Mount] = [
     Mount(Path("/etc/ld.so.cache"), MountKind.BIND_RO),
     Mount(Path("/etc/ld.so.conf"), MountKind.BIND_RO),
     Mount(Path("/etc/ld.so.conf.d"), MountKind.BIND_RO),
+    Mount(Path("/etc/localtime"), MountKind.BIND_RO),
     Mount(Path("/etc/lsb-release"), MountKind.BIND_RO),
     Mount(Path("/etc/makepkg.conf"), MountKind.BIND_RO),
     Mount(Path("/etc/man_db.conf"), MountKind.BIND_RO),

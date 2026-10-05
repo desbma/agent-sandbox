@@ -285,6 +285,15 @@ class FilesystemTests(SandboxTestCase):
 
         self.assertEqual(report["write"], "EROFS")
 
+    @unittest.skipUnless(Path("/etc/localtime").exists(), "Host has no /etc/localtime")
+    def test_etc_localtime_matches_host(self) -> None:
+        """Expose the host's local time zone definition."""
+        report = self.run_probe(
+            [Op("localtime", OpKind.READ_HEX, "/etc/localtime")], agent="claude"
+        )
+
+        self.assertEqual(report["localtime"], Path("/etc/localtime").read_bytes().hex())
+
     def test_project_dir_is_read_write(self) -> None:
         """Start in the project directory with host content and write-through."""
         (self.fixture.project_dir / "input.txt").write_text("hello from host")

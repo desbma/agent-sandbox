@@ -24,6 +24,7 @@ class OpKind(enum.Enum):
     ACCESS_X = enum.auto()
     READLINK = enum.auto()
     READ = enum.auto()
+    READ_HEX = enum.auto()
     MODE = enum.auto()
     LISTDIR = enum.auto()
     WRITE = enum.auto()
@@ -80,6 +81,7 @@ class Op:
         OpKind.ACCESS_X: lambda arg: os.access(arg, os.X_OK),
         OpKind.READLINK: lambda arg: str(Path(arg).readlink()),
         OpKind.READ: lambda arg: Path(arg).read_text(),
+        OpKind.READ_HEX: lambda arg: Path(arg).read_bytes().hex(),
         OpKind.MODE: lambda arg: oct(stat.S_IMODE(Path(arg).lstat().st_mode)),
         OpKind.LISTDIR: lambda arg: sorted(p.name for p in Path(arg).iterdir()),
         OpKind.WRITE: attempt_write,

@@ -1865,6 +1865,10 @@ class ProjectSlugTests(unittest.TestCase):
             "projets-agentsandbox",
         )
 
+    def test_identity_under_root(self) -> None:
+        """Build the slug from the only component of an identity right under the root."""
+        self.assertEqual(launcher.project_slug(Path("/etc")), "etc")
+
 
 class ClaudePathHashTests(unittest.TestCase):
     """Tests of the base36 path hash mirroring Claude Code's slug disambiguation."""

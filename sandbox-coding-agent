@@ -261,7 +261,7 @@ def project_identity(cwd: Path, repo_info: RepoInfo | None) -> Path:
 
 def project_slug(identity: Path) -> str:
     """Build the slug naming the project's shared dirs."""
-    return "-".join(p.lower() for p in identity.parts[-2:])
+    return "-".join(p.lower() for p in identity.relative_to("/").parts[-2:])
 
 
 def session_tmpfs_mounts(specs: collections.abc.Iterable[AgentSpec]) -> list[Mount]:

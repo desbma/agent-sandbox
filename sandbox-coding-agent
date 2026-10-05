@@ -452,22 +452,29 @@ def claude_project_slug(path: Path) -> str:
 
 def claude_md_symlinks(cwd: Path) -> tuple[tuple[Path, Path], ...]:
     """Return the AGENTS.md to CLAUDE.md link pairs of cwd and its subdirectories."""
+    # before Python 3.14, pathlib predicates raise PermissionError in an unsearchable dir
     dirs = [cwd]
     level = [cwd]
     for _ in range(CLAUDE_MD_MAX_DEPTH):
         children: list[Path] = []
         for d in level:
             with contextlib.suppress(PermissionError):
-                children.extend(d.iterdir())
-        # a symlinked dir resolves elsewhere in the sandbox, where the link cannot be created
-        level = [child for child in children if child.is_dir(follow_symlinks=False)]
+                # a symlinked dir resolves elsewhere in the sandbox, where the link cannot be created
+                children += [
+                    child
+                    for child in d.iterdir()
+                    if child.is_dir(follow_symlinks=False)
+                ]
+        level = children
         dirs += level
-    pairs = ((d / "AGENTS.md", d / "CLAUDE.md") for d in dirs)
-    return tuple(
-        (agents_md, claude_md)
-        for agents_md, claude_md in pairs
-        if agents_md.is_file() and not claude_md.exists(follow_symlinks=False)
-    )
+    pairs: list[tuple[Path, Path]] = []
+    for d in dirs:
+        agents_md = d / "AGENTS.md"
+        claude_md = d / "CLAUDE.md"
+        with contextlib.suppress(PermissionError):
+            if agents_md.is_file() and not claude_md.exists(follow_symlinks=False):
+                pairs.append((agents_md, claude_md))
+    return tuple(pairs)
 
 
 def show_message(msg: str) -> None:

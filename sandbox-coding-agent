@@ -455,13 +455,12 @@ def claude_md_symlinks(cwd: Path) -> tuple[tuple[Path, Path], ...]:
     dirs = [cwd]
     level = [cwd]
     for _ in range(CLAUDE_MD_MAX_DEPTH):
+        children: list[Path] = []
+        for d in level:
+            with contextlib.suppress(PermissionError):
+                children.extend(d.iterdir())
         # a symlinked dir resolves elsewhere in the sandbox, where the link cannot be created
-        level = [
-            child
-            for d in level
-            for child in d.iterdir()
-            if child.is_dir(follow_symlinks=False)
-        ]
+        level = [child for child in children if child.is_dir(follow_symlinks=False)]
         dirs += level
     pairs = ((d / "AGENTS.md", d / "CLAUDE.md") for d in dirs)
     return tuple(

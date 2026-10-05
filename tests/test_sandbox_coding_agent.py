@@ -1980,6 +1980,18 @@ class ClaudeMdSymlinksTests(TempDirTestCase):
             launcher.claude_md_symlinks(cwd), ((launch_dir_md, cwd / "CLAUDE.md"),)
         )
 
+    def test_unreadable_dirs(self) -> None:
+        """Skip subdirectories the user cannot list."""
+        cwd = self.make_temp_dir()
+        launch_dir_md = self.make_agents_md(cwd, ".")
+        private = self.make_agents_md(cwd, "private").parent
+        private.chmod(0o000)
+        self.addCleanup(private.chmod, 0o700)
+
+        self.assertEqual(
+            launcher.claude_md_symlinks(cwd), ((launch_dir_md, cwd / "CLAUDE.md"),)
+        )
+
     def test_spec_uses_launch_dir(self) -> None:
         """Derive the claude spec symlinks from the launch directory."""
         cwd = self.make_temp_dir()

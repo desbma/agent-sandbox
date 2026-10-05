@@ -2036,6 +2036,17 @@ class ConfirmCwdTests(TempDirTestCase):
 
         self.assertEqual(ctx.exception.code, 1)
 
+    def test_refuses_root(self) -> None:
+        """Exit when started directly in the root directory."""
+        with (
+            contextlib.chdir("/"),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            launcher.confirm_cwd(None)
+
+        self.assertEqual(ctx.exception.code, 1)
+
     def test_prompt_accepted_moves_to_repo_root(self) -> None:
         """Move to the repository root when the user accepts the prompt."""
         repo = self.make_temp_dir()

@@ -1400,6 +1400,13 @@ class LaunchPolicyTests(SandboxTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Refusing to start in", result.stderr)
 
+    def test_refuses_to_start_in_root(self) -> None:
+        """Exit with an error when started in the root directory."""
+        result = self.run_launcher(agent="claude", cwd=Path("/"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Refusing to start in '/'", result.stderr)
+
     def test_repo_root_prompt_defaults_to_cwd(self) -> None:
         """Stay in a repo subdirectory when stdin cannot answer the prompt."""
         subprocess.run(

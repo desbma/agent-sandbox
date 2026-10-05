@@ -971,6 +971,14 @@ class ResolveExtraAgentsTests(TempDirTestCase):
         with self.agents((pi_bin,)):
             self.assertNotIn("pi", launcher.resolve_extra_agents("pi"))
 
+    def test_provisions_every_installed_extra(self) -> None:
+        """Provision every installed always-provisioned agent beside the launched one."""
+        installed = {"hax": Path("/usr/bin/hax"), "pi": Path("/usr/bin/pi")}
+        with unittest.mock.patch.object(
+            launcher.os, "access", lambda path, _mode: path in installed.values()
+        ):
+            self.assertEqual(launcher.resolve_extra_agents("claude"), installed)
+
 
 class AgentFilesTests(unittest.TestCase):
     """Tests of the per-agent generated config files."""

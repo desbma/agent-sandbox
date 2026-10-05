@@ -919,6 +919,7 @@ AGENTS: dict[str, AgentSpec] = {
             Mount(XDG_CONFIG_HOME / "hax", MountKind.BIND_RW, HOME / ".config/hax"),
             Mount(XDG_STATE_HOME / "hax", MountKind.BIND_RW, HOME / ".local/state/hax"),
         ),
+        provision_always=(Path("/usr/bin/hax"),),
     ),
     "pi": AgentSpec(
         agents_md=HOME / ".pi/agent/AGENTS.md",
@@ -1111,10 +1112,10 @@ if __name__ == "__main__":
             bwrap_args += ["--symlink", str(target), str(link)]
 
     # env
+    prefixes = tuple(f"{name.upper()}_" for name in agents)
     forwarded = {
         env_k: os.environ[env_k]
-        for env_k in ENV_FORWARD
-        + [k for k in os.environ if k.startswith(f"{AGENT.upper()}_")]
+        for env_k in ENV_FORWARD + [k for k in os.environ if k.startswith(prefixes)]
         if env_k in os.environ
     }
     bwrap_args.append("--clearenv")

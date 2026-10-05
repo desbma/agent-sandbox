@@ -565,7 +565,8 @@ class EnvironmentTests(SandboxTestCase):
         self.assertIsNone(report["gh_token"])
 
     def test_agent_prefix_forwarding_follows_agent_name(self) -> None:
-        """Forward only the env vars prefixed with the launched agent's name."""
+        """Forward only the env vars prefixed with a provisioned agent's name."""
+        self.make_executable(self.fixture.home / ".local/libexec/pi/pi")
         (self.fixture.config_home / "codex").mkdir()
         (self.fixture.config_home / "codex/config.toml").write_text('model = "test"\n')
 
@@ -573,14 +574,20 @@ class EnvironmentTests(SandboxTestCase):
             [
                 Op("ps1", OpKind.ENV, "PS1"),
                 Op("codex_visible", OpKind.ENV, "CODEX_VISIBLE"),
+                Op("pi_visible", OpKind.ENV, "PI_VISIBLE"),
                 Op("claude_visible", OpKind.ENV, "CLAUDE_VISIBLE"),
             ],
             agent="codex",
-            extra_env={"CODEX_VISIBLE": "yes", "CLAUDE_VISIBLE": "yes"},
+            extra_env={
+                "CODEX_VISIBLE": "yes",
+                "PI_VISIBLE": "yes",
+                "CLAUDE_VISIBLE": "yes",
+            },
         )
 
         self.assertEqual(report["ps1"], "codex-sandbox$ ")
         self.assertEqual(report["codex_visible"], "yes")
+        self.assertEqual(report["pi_visible"], "yes")
         self.assertIsNone(report["claude_visible"])
 
     def test_proxy_routing_when_ca_bundle_present(self) -> None:
@@ -804,7 +811,7 @@ class InstructionsTests(SandboxTestCase):
         self.assertNotIn("reviews", content)
         self.assertNotIn("handoff", content)
         self.assertEqual(list(self.fixture.runtime_dir.iterdir()), [])
-        self.assertEqual(list(self.fixture.state_home.iterdir()), [])
+        self.assertFalse((self.fixture.state_home / "agents").exists())
 
     def test_unjail_tools_expose_xdg_open(self) -> None:
         """Expose xdg-open in the sandbox when the unjail tools are on PATH."""

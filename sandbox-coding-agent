@@ -912,6 +912,7 @@ AGENTS: dict[str, AgentSpec] = {
                 f'[projects."{CWD}"]\ntrust_level = "trusted"\n'.encode()
             )
         },
+        provision_always=(Path("/usr/bin/codex"),),
     ),
     "hax": AgentSpec(
         agents_md=HOME / ".config/hax/AGENTS.md",

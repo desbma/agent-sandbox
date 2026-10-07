@@ -356,6 +356,19 @@ class AgentSpecsTests(unittest.TestCase):
             launcher.AGENTS["hax"].mounts,
         )
 
+    def test_always_provisioned_agents(self) -> None:
+        """Name the binaries probed to provision an agent beside the launched one."""
+        self.assertEqual(
+            {name: spec.provision_always for name, spec in launcher.AGENTS.items()},
+            {
+                "amp": (),
+                "claude": (),
+                "codex": (Path("/usr/bin/codex"),),
+                "hax": (Path("/usr/bin/hax"),),
+                "pi": (Path("/usr/bin/pi"), FAKE_HOME / ".local/libexec/pi/pi"),
+            },
+        )
+
     def test_claude_config_lives_in_the_mounted_config_dir(self) -> None:
         """Keep claude.json inside the bind-mounted config directory, with no mount of its own."""
         spec = launcher.AGENTS["claude"]

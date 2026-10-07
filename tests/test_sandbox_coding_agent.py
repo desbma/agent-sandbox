@@ -943,7 +943,7 @@ class ResolveExtraAgentsTests(TempDirTestCase):
     @contextlib.contextmanager
     def agents(
         self, provision_always: tuple[Path, ...]
-    ) -> collections.abc.Iterator[None]:
+    ) -> collections.abc.Generator[None]:
         """Replace the agent table with a claude and a pi provisioned from the given paths."""
         table = {
             "claude": launcher.AgentSpec(agents_md=Path("/claude/CLAUDE.md")),

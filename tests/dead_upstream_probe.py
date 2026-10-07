@@ -32,7 +32,7 @@ class Case(enum.StrEnum):
 @contextlib.contextmanager
 def running_proxy(
     agent_proxy: str, address: tuple[str, int], work: str
-) -> collections.abc.Iterator[None]:
+) -> collections.abc.Generator[None]:
     """Run agent-proxy with its state in work, until the context exits."""
     env = os.environ | {"XDG_DATA_HOME": work, "RUNTIME_DIRECTORY": work}
     with subprocess.Popen(

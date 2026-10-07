@@ -345,6 +345,17 @@ class AgentSpecsTests(unittest.TestCase):
             launcher.AGENTS["codex"].mounts,
         )
 
+    def test_hax_own_skill_dir_is_read_only(self) -> None:
+        """Expose hax's own skill directory read-only inside its writable config directory."""
+        self.assertIn(
+            launcher.Mount(
+                FAKE_CONFIG_HOME / "hax/skills",
+                launcher.MountKind.BIND_RO,
+                FAKE_HOME / ".config/hax/skills",
+            ),
+            launcher.AGENTS["hax"].mounts,
+        )
+
     def test_claude_config_lives_in_the_mounted_config_dir(self) -> None:
         """Keep claude.json inside the bind-mounted config directory, with no mount of its own."""
         spec = launcher.AGENTS["claude"]

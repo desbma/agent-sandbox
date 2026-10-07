@@ -924,6 +924,11 @@ AGENTS: dict[str, AgentSpec] = {
             ),
             Mount(XDG_CACHE_HOME / "hax", MountKind.BIND_RW, HOME / ".cache/hax"),
             Mount(XDG_CONFIG_HOME / "hax", MountKind.BIND_RW, HOME / ".config/hax"),
+            Mount(
+                XDG_CONFIG_HOME / "hax/skills",
+                MountKind.BIND_RO,
+                HOME / ".config/hax/skills",
+            ),
             Mount(XDG_STATE_HOME / "hax", MountKind.BIND_RW, HOME / ".local/state/hax"),
         ),
         provision_always=(Path("/usr/bin/hax"),),

@@ -951,8 +951,6 @@ AGENTS: dict[str, AgentSpec] = {
             Mount(XDG_CONFIG_HOME / "pi", MountKind.BIND_RW, HOME / ".pi"),
             Mount(HOME / ".local/libexec/pi", MountKind.BIND_RO),
         ),
-        # keep pi's extension modules in its own state dir
-        files={HOME / ".npmrc": File(f"prefix={HOME / '.pi/agent/npm'}\n".encode())},
         provision_always=(Path("/usr/bin/pi"), HOME / ".local/libexec/pi/pi"),
     ),
 }

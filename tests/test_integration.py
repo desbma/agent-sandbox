@@ -1130,11 +1130,10 @@ class AgentSpecificTests(SandboxTestCase):
 
         self.assertEqual(report["helper_executable"], True)
 
-    def test_pi_gets_npmrc_and_instructions(self) -> None:
-        """Generate the npm prefix config and instructions for pi."""
+    def test_pi_gets_instructions(self) -> None:
+        """Generate pi's instructions."""
         report = self.run_probe(
             [
-                Op("npmrc", OpKind.READ, self.fixture.home / ".npmrc"),
                 Op(
                     "agents_md_exists",
                     OpKind.EXISTS,
@@ -1144,7 +1143,6 @@ class AgentSpecificTests(SandboxTestCase):
             agent="pi",
         )
 
-        self.assertEqual(report["npmrc"], f"prefix={self.fixture.home}/.pi/agent/npm\n")
         self.assertEqual(report["agents_md_exists"], True)
 
     def test_amp_dirs_round_trip(self) -> None:

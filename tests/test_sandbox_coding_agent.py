@@ -1017,12 +1017,6 @@ class AgentFilesTests(unittest.TestCase):
             f'[projects."{IMPORT_CWD}"]\ntrust_level = "trusted"\n',
         )
 
-    def test_pi_npmrc_points_at_its_state_dir(self) -> None:
-        """Prefix pi's npm modules with its own state directory."""
-        content = launcher.AGENTS["pi"].files[FAKE_HOME / ".npmrc"].data.decode()
-
-        self.assertEqual(content, f"prefix={FAKE_HOME / '.pi/agent/npm'}\n")
-
 
 class ClaudeMemoryEnvTests(TempDirTestCase):
     """Tests of the Claude memory override keyed on the jj default workspace."""

@@ -222,9 +222,11 @@ def jj_workspaces() -> dict[str, Path] | None:
     )
     if out is None:
         return None
+    # jj before 0.46 lists a workspace deleted without being forgotten with an empty root
     return {
         name: Path(root)
         for name, root in (line.split("\t", 1) for line in out.splitlines())
+        if root
     }
 
 
@@ -255,11 +257,16 @@ def query_repo_info(cwd: Path) -> RepoInfo | None:
 
 
 def shared_workspace_root(cwd: Path, ws_roots: collections.abc.Sequence[Path]) -> Path:
-    """Return the directory shared by a repo's workspace roots, or cwd if too scattered."""
-    shared = Path(os.path.commonprefix([str(root) for root in ws_roots]).rstrip("/"))
-    # a common prefix cutting mid-component is not a real directory; back up to its parent
-    if not shared.is_dir():
-        shared = shared.parent
+    """Return the directory shared by a repo's workspace roots, or cwd if none or too scattered."""
+    if not ws_roots:
+        return cwd
+    names = [str(root) for root in ws_roots]
+    bare = min(names, key=len)
+    # flat siblings such as proj and proj-ws1 share the bare project dir their names extend
+    if all(name.startswith(bare) for name in names):
+        shared = Path(bare)
+    else:
+        shared = Path(os.path.commonpath(ws_roots))
     current = max(
         (root for root in ws_roots if cwd.is_relative_to(root)),
         key=lambda root: len(root.parts),

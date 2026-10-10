@@ -1845,6 +1845,15 @@ class JjWorkspacesTests(TempDirTestCase):
                     {"default": repo, "ws1": ws1},
                 )
 
+    def test_skips_workspace_listed_without_root(self) -> None:
+        """Leave out a workspace listed without a root, as jj before 0.46 lists a deleted one."""
+        listing = "default\t/repo/main\nws1\t\n"
+        with (
+            unittest.mock.patch.object(launcher, "JJ_BIN", "/usr/bin/jj"),
+            unittest.mock.patch.object(launcher, "run_capture", return_value=listing),
+        ):
+            self.assertEqual(launcher.jj_workspaces(), {"default": Path("/repo/main")})
+
 
 class QueryRepoInfoTests(TempDirTestCase):
     """Tests of single-query VCS layout resolution."""
@@ -1916,8 +1925,8 @@ class SharedWorkspaceRootTests(TempDirTestCase):
             launcher.shared_workspace_root(base / "proj/ws1", roots), base / "proj"
         )
 
-    def test_nested_shared_letter_prefix_backs_up_to_project(self) -> None:
-        """Back up to the grouping dir when the common prefix cuts mid-component."""
+    def test_nested_shared_letter_prefix_keys_on_project(self) -> None:
+        """Key on the grouping dir when the workspace names share leading letters."""
         base, roots = self.build(["proj/master", "proj/main"])
 
         self.assertEqual(
@@ -1934,7 +1943,8 @@ class SharedWorkspaceRootTests(TempDirTestCase):
 
     def test_flat_and_nested_share_across_workspaces(self) -> None:
         """Resolve every workspace of a repo to the same root."""
-        base, roots = self.build(["proj", "proj-ws1", "proj-ws2"])
+        # the bare project dir need not be listed first
+        base, roots = self.build(["proj-ws1", "proj-ws2", "proj"])
 
         resolved = {launcher.shared_workspace_root(root, roots) for root in roots}
 
@@ -1945,6 +1955,19 @@ class SharedWorkspaceRootTests(TempDirTestCase):
         base, roots = self.build(["proj-main", "proj-ws1", "proj-ws2"])
 
         self.assertEqual(launcher.shared_workspace_root(base / "proj-ws1", roots), base)
+
+    def test_flat_shared_letters_ignore_unrelated_dir(self) -> None:
+        """Collapse to the container even when a dir outside the repo matches the shared letters."""
+        base, roots = self.build(["proj-ws1", "proj-ws2"])
+        (base / "proj-ws").mkdir()
+
+        self.assertEqual(launcher.shared_workspace_root(base / "proj-ws1", roots), base)
+
+    def test_no_workspace_falls_back_to_cwd(self) -> None:
+        """Key on cwd when the repo lists no workspace."""
+        cwd = self.make_temp_dir()
+
+        self.assertEqual(launcher.shared_workspace_root(cwd, ()), cwd)
 
     def test_cwd_in_workspace_subdir(self) -> None:
         """Resolve the shared root from a directory below a workspace root."""

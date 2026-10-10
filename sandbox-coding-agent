@@ -145,9 +145,6 @@ class AgentSpec:
     credentials: Mount | LinkedCredentials | None = None
     # arguments of the agent's own login command, None when it starts fine on empty credentials
     login_args: tuple[str, ...] | None = None
-    # what the agent falls back on with empty credentials, None when it starts logged out or
-    # login_args refuses them
-    empty_profile_notice: str | None = None
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
@@ -390,10 +387,6 @@ def apply_auth_profiles(
                 fatal_error(
                     f"{name.title()} auth profile {profile!r} is empty, run `{command}`"
                 )
-        if empty and (spec.empty_profile_notice is not None):
-            show_message(
-                f"{name.title()} auth profile {profile!r} is empty, {spec.empty_profile_notice}"
-            )
         if isinstance(spec.credentials, LinkedCredentials):
             applied[name] = linked_profile_spec(
                 name, spec, spec.credentials, credentials
@@ -985,7 +978,6 @@ AGENTS: dict[str, AgentSpec] = {
                 f'[projects."{CWD}"]\ntrust_level = "trusted"\n'.encode()
             )
         },
-        provision_always=(Path("/usr/bin/codex"),),
     ),
     "hax": AgentSpec(
         agents_md=HOME / ".config/hax/AGENTS.md",
@@ -997,7 +989,6 @@ AGENTS: dict[str, AgentSpec] = {
             files=("state.json",),
             dirs=("sessions",),
         ),
-        empty_profile_notice="hax uses any codex CLI login until /login",
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",

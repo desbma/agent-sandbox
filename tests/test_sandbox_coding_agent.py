@@ -363,7 +363,7 @@ class AgentSpecsTests(unittest.TestCase):
             {
                 "amp": (),
                 "claude": (),
-                "codex": (Path("/usr/bin/codex"),),
+                "codex": (),
                 "hax": (Path("/usr/bin/hax"),),
                 "pi": (Path("/usr/bin/pi"), FAKE_HOME / ".local/libexec/pi/pi"),
             },
@@ -464,25 +464,6 @@ class AuthProfilesTests(TempDirTestCase):
         }
         with unittest.mock.patch.dict(os.environ, env, clear=True):
             return launcher.apply_auth_profiles(agents, launched_agent, launched_args)
-
-    def resolve_report(
-        self,
-        agents: dict[str, launcher.AgentSpec],
-        *,
-        launched_agent: str = "claude",
-        launched_args: collections.abc.Sequence[str] = (),
-        **profiles: str,
-    ) -> str:
-        """Apply the auth profiles of agents, returning what the launcher reported."""
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            self.resolve(
-                agents,
-                launched_agent=launched_agent,
-                launched_args=launched_args,
-                **profiles,
-            )
-        return stderr.getvalue()
 
     def fail_report(
         self,
@@ -652,34 +633,6 @@ class AuthProfilesTests(TempDirTestCase):
             },
         )
 
-    def test_empty_profile_notices_of_known_agents(self) -> None:
-        """Give a notice to the agents falling back on other credentials when logged out."""
-        self.assertEqual(
-            {
-                name
-                for name, spec in launcher.AGENTS.items()
-                if spec.empty_profile_notice is not None
-            },
-            {"hax"},
-        )
-
-    def test_starts_on_an_empty_profile_with_its_notice(self) -> None:
-        """Start an agent whose empty profile falls back on other credentials, saying so."""
-        spec = dataclasses.replace(self.spec, empty_profile_notice="it borrows a login")
-
-        report = self.resolve_report({"hax": spec}, launched_agent="hax", hax="pro")
-
-        self.assertIn("Hax auth profile 'pro' is empty, it borrows a login", report)
-
-    def test_drops_the_notice_once_the_profile_is_logged_in(self) -> None:
-        """Stay quiet once the profile of an agent with an empty profile notice holds a login."""
-        spec = dataclasses.replace(self.spec, empty_profile_notice="it borrows a login")
-        self.profile.write_text('{"token": "pro"}')
-
-        self.assertEqual(
-            self.resolve_report({"hax": spec}, launched_agent="hax", hax="pro"), ""
-        )
-
     def test_refuses_to_start_the_launched_agent_on_an_empty_profile(self) -> None:
         """Fail before starting an agent that would only reject the empty credentials."""
         spec = dataclasses.replace(self.spec, login_args=("login",))
@@ -698,31 +651,28 @@ class AuthProfilesTests(TempDirTestCase):
     def test_starts_the_login_filling_an_empty_profile(self) -> None:
         """Expose the empty credentials to the login command meant to write them."""
         spec = dataclasses.replace(self.spec, login_args=("login",))
-        stderr = io.StringIO()
 
-        with contextlib.redirect_stderr(stderr):
-            specs = self.resolve(
-                {"codex": spec},
-                launched_agent="codex",
-                launched_args=("login",),
-                codex="pro",
-            )
+        specs = self.resolve(
+            {"codex": spec},
+            launched_agent="codex",
+            launched_args=("login",),
+            codex="pro",
+        )
 
         self.assertEqual(specs, {"codex": self.with_credentials(spec, self.profile)})
-        self.assertEqual(stderr.getvalue(), "")
 
     def test_starts_a_login_carrying_its_own_arguments(self) -> None:
         """Recognize the login command whatever arguments follow it."""
         spec = dataclasses.replace(self.spec, login_args=("login",))
 
-        report = self.resolve_report(
+        specs = self.resolve(
             {"codex": spec},
             launched_agent="codex",
             launched_args=("login", "--api-key", "secret"),
             codex="pro",
         )
 
-        self.assertEqual(report, "")
+        self.assertEqual(specs, {"codex": self.with_credentials(spec, self.profile)})
 
     def test_refuses_to_start_on_the_empty_profile_of_another_agent(self) -> None:
         """Fail on an empty profile selected for an agent that is provisioned but not launched."""
@@ -736,27 +686,27 @@ class AuthProfilesTests(TempDirTestCase):
         """Recognize the login command behind the flags the PATH wrapper inserts."""
         spec = dataclasses.replace(self.spec, login_args=("login",))
 
-        report = self.resolve_report(
+        specs = self.resolve(
             {"codex": spec},
             launched_agent="codex",
             launched_args=("--dangerously-bypass-approvals-and-sandbox", "login"),
             codex="pro",
         )
 
-        self.assertEqual(report, "")
+        self.assertEqual(specs, {"codex": self.with_credentials(spec, self.profile)})
 
     def test_starts_a_login_between_wrapper_flags_and_its_own_arguments(self) -> None:
         """Recognize the login command surrounded by wrapper flags and its own arguments."""
         spec = dataclasses.replace(self.spec, login_args=("login",))
 
-        report = self.resolve_report(
+        specs = self.resolve(
             {"codex": spec},
             launched_agent="codex",
             launched_args=("--yolo", "login", "--api-key", "secret"),
             codex="pro",
         )
 
-        self.assertEqual(report, "")
+        self.assertEqual(specs, {"codex": self.with_credentials(spec, self.profile)})
 
     def test_refuses_to_start_on_a_command_resembling_the_login(self) -> None:
         """Fail when the launched command only looks like the login one."""
@@ -771,19 +721,14 @@ class AuthProfilesTests(TempDirTestCase):
 
         self.assertIn("`SANDBOX_AGENT_CODEX_AUTH=pro codex login`", report)
 
-    def test_reports_nothing_once_the_profile_is_logged_in(self) -> None:
-        """Stay quiet once the profile credentials hold a login."""
+    def test_starts_on_a_logged_in_profile_without_the_login(self) -> None:
+        """Expose the profile credentials once they hold a login, whatever the launched command."""
         spec = dataclasses.replace(self.spec, login_args=("login",))
         self.profile.write_text('{"token": "pro"}')
 
-        self.assertEqual(
-            self.resolve_report({"codex": spec}, launched_agent="codex", codex="pro"),
-            "",
-        )
+        specs = self.resolve({"codex": spec}, launched_agent="codex", codex="pro")
 
-    def test_reports_nothing_for_an_agent_starting_logged_out(self) -> None:
-        """Stay quiet for an agent whose own login flow handles empty credentials."""
-        self.assertEqual(self.resolve_report({"claude": self.spec}, claude="pro"), "")
+        self.assertEqual(specs, {"codex": self.with_credentials(spec, self.profile)})
 
     def test_binds_linked_state_dir_without_profile(self) -> None:
         """Expose the state dir holding linked credentials at its own location by default."""

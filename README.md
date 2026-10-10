@@ -52,7 +52,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
   - the per-project directories above and Claude Code's project memory are shared between all workspaces of a repository
 - Injects a small prompt to describe the sandbox to the agent, its directories and mount points, etc. It is appended to the agent's global instructions, built from `~/.config/agents/AGENTS.md` and, if present, the agent specific `~/.config/agents/AGENTS.<agent>.md` (ie. `AGENTS.claude.md`)
 - Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
-- Provisions the other installed agents alongside the one being launched, so it can spawn them as subagents, typically to get a review from a different model
+- Provisions hax and Pi, when installed, alongside the launched agent, so it can spawn them as subagents, typically to get a review from a different model
 - Optional auth profiles (every agent but Amp), to run an agent under a second account without logging in and out: `SANDBOX_AGENT_<AGENT>_AUTH=<profile>` switches the agent's credentials to a per-profile file, created empty on first use (ie. `SANDBOX_AGENT_CLAUDE_AUTH=pro` uses `~/.config/claude/.credentials-pro.json`)
 - Applies per-agent quality of life fixes: Codex CLI trusts the launch directory instead of prompting about it, Pi keeps its extension modules in its own state directory, etc.
 - Safeguards against accidental launches from the wrong directory: the home directory is rejected, and a repository subdirectory offers to switch to the repository root

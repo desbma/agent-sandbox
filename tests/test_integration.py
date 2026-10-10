@@ -464,6 +464,21 @@ class GeneratedFileTests(SandboxTestCase):
         self.assertEqual([line.split(":")[0] for line in lines], expected_names)
         self.assertEqual(report["mode"], "0o600")
 
+    def test_launcher_copy(self) -> None:
+        """Expose a read-only copy of the launcher script."""
+        report = self.run_probe(
+            [
+                Op("launcher", OpKind.READ, "/run/sandbox-coding-agent/launcher"),
+                Op("mode", OpKind.MODE, "/run/sandbox-coding-agent/launcher"),
+                Op("write", OpKind.WRITE, "/run/sandbox-coding-agent/launcher"),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(self.report_str(report, "launcher"), SCRIPT_PATH.read_text())
+        self.assertEqual(report["mode"], "0o600")
+        self.assertEqual(report["write"], "EROFS")
+
     def test_etc_group(self) -> None:
         """Generate a stripped /etc/group led by the current primary group."""
         report = self.run_probe(
@@ -667,7 +682,7 @@ class InstructionsTests(SandboxTestCase):
                 f"{BASE_INSTRUCTIONS.strip()}\n\n## Sandbox environment\n"
             )
         )
-        self.assertIn("You are running in a `bwrap` based sandbox.", content)
+        self.assertIn("You are running in a `bwrap` based sandbox", content)
         lines = content.splitlines()
         tmpfs_line = next(line for line in lines if "tmpfs filesystems" in line)
         self.assertIn(f"`{self.fixture.home}`", tmpfs_line)
@@ -687,7 +702,7 @@ class InstructionsTests(SandboxTestCase):
             content,
         )
         self.assertNotIn("overlayfs filesystems", content)
-        self.assertNotIn("xdg-open", content)
+        self.assertNotIn("`xdg-open` is available", content)
         self.assertNotIn("`gh`", content)
         self.assertEqual(report["mode"], "0o600")
 
@@ -834,9 +849,9 @@ class InstructionsTests(SandboxTestCase):
         self.assertEqual(report["cwd"], str(project))
         self.assertEqual(report["runtime_entries"], [])
         content = self.report_str(report, "claude_md")
-        self.assertNotIn("exchange", content)
-        self.assertNotIn("reviews", content)
-        self.assertNotIn("handoff", content)
+        self.assertNotIn('"exchange" directory', content)
+        self.assertNotIn('"review" directory', content)
+        self.assertNotIn('"handoff" directory', content)
         self.assertEqual(list(self.fixture.runtime_dir.iterdir()), [])
         self.assertFalse((self.fixture.state_home / "agents").exists())
 

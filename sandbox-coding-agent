@@ -802,6 +802,10 @@ SHARED_DIR_MAX_PREFIX_DEPTH_DELTA = 2
 # sandbox dir of the launcher's own runtime paths
 LAUNCHER_RUN_DIR = Path("/run/sandbox-coding-agent")
 
+# host path of this launcher script, and sandbox path of its read-only copy
+LAUNCHER_HOST_PATH = Path(__file__).resolve()
+LAUNCHER_COPY_PATH = LAUNCHER_RUN_DIR / "launcher"
+
 # host CPU topology, read from sysfs and handed to the guest microvm launcher
 SYS_CPU_DIR = Path("/sys/devices/system/cpu")
 CPU_TOPOLOGY_PATH = LAUNCHER_RUN_DIR / "cpu-topology"
@@ -872,9 +876,9 @@ MOUNTS: list[Mount] = [
 ]
 
 # global dynamically generated AGENTS.md
-GLOBAL_AGENTS_MD_INTRO = """## Sandbox environment
+GLOBAL_AGENTS_MD_INTRO = f"""## Sandbox environment
 
-You are running in a `bwrap` based sandbox.
+You are running in a `bwrap` based sandbox, set up by the `{LAUNCHER_HOST_PATH}` script on the host. `{LAUNCHER_COPY_PATH}` is a read-only copy of that script, taken at launch: read it only when this section does not answer a question about how the sandbox works (mounts, generated paths, auth profiles, why an operation is denied), and search it for the relevant part rather than reading it whole.
 
 - Do not attempt to directly run commands that require privileges (`sudo`, `su`, etc.), they would fail. If you need to do so, use the `agent-microvm` skill.
 - You have unrestricted network access."""
@@ -1076,6 +1080,7 @@ FILES: dict[Path, File] = {
         b"passwd: files\ngroup: files\nhosts: files dns\n"
     ),
     Path("/etc/passwd"): File(gen_passwd(GROUPS)),
+    LAUNCHER_COPY_PATH: File(LAUNCHER_HOST_PATH.read_bytes()),
     **({SANDBOX_BIN_DIR / "jj": JJ_WRAPPER} if IN_JJ_WORKSPACE else {}),
     # passthrough shim: inside the sandbox an agent wrapper's re-exec of this launcher
     # runs the target agent directly, since provisioning already happened

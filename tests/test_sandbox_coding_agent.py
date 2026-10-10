@@ -898,6 +898,15 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
         self.assertTrue(content.startswith("## Sandbox environment\n"))
         self.assertTrue(content.endswith("\n"))
 
+    def test_launcher_copy_sentence(self) -> None:
+        """Name the launcher's host path and the sandbox path of its copy."""
+        content = self.render()
+
+        self.assertIn(f"set up by the `{SCRIPT_PATH}` script on the host", content)
+        self.assertIn(
+            "`/run/sandbox-coding-agent/launcher` is a read-only copy", content
+        )
+
     def test_agent_file_between_base_and_section(self) -> None:
         """Insert the per-agent file after the base instructions, before the sandbox section."""
         self.base_path.write_text("# my base\n")
@@ -949,7 +958,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertIn("place them under `/run/user/1000/exchange`", with_bullet)
         self.assertNotIn("plan files", with_bullet)
-        self.assertNotIn("exchange", without_bullet)
+        self.assertNotIn('"exchange" directory', without_bullet)
 
     def test_review_dir_bullet(self) -> None:
         """Mention the review directory only when one exists."""
@@ -958,7 +967,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertIn("`/home/x/.local/state/reviews/proj`", with_bullet)
         self.assertIn('"review" directory', with_bullet)
-        self.assertNotIn("review", without_bullet)
+        self.assertNotIn('"review" directory', without_bullet)
 
     def test_handoff_dir_bullet(self) -> None:
         """Mention the handoff directory only when one exists."""
@@ -969,7 +978,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertIn("`/home/x/.local/state/agents/handoff/proj`", with_bullet)
         self.assertIn('"handoff" directory', with_bullet)
-        self.assertNotIn("handoff", without_bullet)
+        self.assertNotIn('"handoff" directory', without_bullet)
 
     def test_shared_dir_bullets_order(self) -> None:
         """List the handoff directory first, then the review one, then the exchange one."""
@@ -979,8 +988,12 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
             handoff_dir=Path("/home/x/.local/state/agents/handoff/proj"),
         )
 
-        self.assertLess(content.index("handoff"), content.index("Code reviews"))
-        self.assertLess(content.index("Code reviews"), content.index("exchange"))
+        self.assertLess(
+            content.index('"handoff" directory'), content.index("Code reviews")
+        )
+        self.assertLess(
+            content.index("Code reviews"), content.index('"exchange" directory')
+        )
 
     def test_unjaild_bullet(self) -> None:
         """Mention xdg-open only when the unjail tools are available."""
@@ -988,7 +1001,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
         without_bullet = self.render()
 
         self.assertIn("`xdg-open` is available", with_bullet)
-        self.assertNotIn("xdg-open", without_bullet)
+        self.assertNotIn("`xdg-open` is available", without_bullet)
 
     def test_proxy_bullet(self) -> None:
         """Mention gh only when the auth proxy is running."""
@@ -1005,7 +1018,7 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
 
         self.assertIn(f"`{launcher.SANDBOX_BIN_DIR / 'jj'}`", with_bullet)
         self.assertIn("`/opt/bin/jj`", with_bullet)
-        self.assertNotIn("jj", without_bullet)
+        self.assertNotIn("wrapper adding `--ignore-working-copy`", without_bullet)
 
 
 class ResolveExtraAgentsTests(TempDirTestCase):
@@ -1118,6 +1131,16 @@ class ClaudeMemoryEnvTests(TempDirTestCase):
                 ),
             },
         )
+
+
+class LauncherCopyFileTests(unittest.TestCase):
+    """Tests of the provisioning of the launcher's read-only copy."""
+
+    def test_copies_launcher_content(self) -> None:
+        """Provision a copy of the launcher script's own content."""
+        file = launcher.FILES[Path("/run/sandbox-coding-agent/launcher")]
+
+        self.assertEqual(file.data, SCRIPT_PATH.read_bytes())
 
 
 class JjWrapperFileTests(TempDirTestCase):

@@ -36,6 +36,9 @@ JJ_BIN = shutil.which(
     path=os.pathsep.join(entry for entry in os.get_exec_path() if entry != "/run/bin"),
 )
 SYS_CPU_ONLINE = Path("/sys/devices/system/cpu/online")
+HAX_BIN = Path("/usr/bin/hax")
+# sandbox path of the host hax state dir under an auth profile
+HAX_PROFILE_STATE_DIR = Path("/run/sandbox-coding-agent/hax-state")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1220,6 +1223,97 @@ class AgentSpecificTests(SandboxTestCase):
             (self.fixture.cache_home / "hax/catalog.json").read_text(), "canary"
         )
 
+    def test_hax_auth_profile_swaps_credentials(self) -> None:
+        """Link the hax credentials to the profile's, leaving the default ones alone."""
+        state_dir = self.fixture.state_home / "hax"
+        state_dir.mkdir()
+        (state_dir / "auth.json").write_text('{"token": "default"}')
+        credentials = self.fixture.home / ".local/state/hax/auth.json"
+
+        report = self.run_probe(
+            [
+                Op("credentials", OpKind.READ, credentials),
+                Op("link", OpKind.READLINK, credentials),
+                # hax stages its credentials beside the file the link resolves to
+                Op(
+                    "login", OpKind.RENAME_OVER, HAX_PROFILE_STATE_DIR / "auth-pro.json"
+                ),
+            ],
+            agent="hax",
+            extra_env={"SANDBOX_AGENT_HAX_AUTH": "pro"},
+        )
+
+        self.assertEqual(report["credentials"], "{}")
+        self.assertEqual(report["link"], str(HAX_PROFILE_STATE_DIR / "auth-pro.json"))
+        self.assertEqual(report["login"], "ok")
+        self.assertEqual((state_dir / "auth-pro.json").read_text(), "canary")
+        self.assertEqual((state_dir / "auth.json").read_text(), '{"token": "default"}')
+
+    def test_hax_auth_profile_keeps_state_on_host(self) -> None:
+        """Send the hax state and sessions of a profile launch to the host state dir."""
+        state_dir = self.fixture.state_home / "hax"
+        sandbox_state_dir = self.fixture.home / ".local/state/hax"
+
+        report = self.run_probe(
+            [
+                Op("state", OpKind.WRITE, sandbox_state_dir / "state.json"),
+                Op("session", OpKind.WRITE, sandbox_state_dir / "sessions/new.jsonl"),
+                # hax skips pruning a symlinked session dir
+                Op("sessions_link", OpKind.ISLINK, sandbox_state_dir / "sessions"),
+            ],
+            agent="hax",
+            extra_env={"SANDBOX_AGENT_HAX_AUTH": "pro"},
+        )
+
+        self.assertEqual(
+            report, {"state": "ok", "session": "ok", "sessions_link": False}
+        )
+        self.assertEqual((state_dir / "state.json").read_text(), "canary")
+        self.assertEqual((state_dir / "sessions/new.jsonl").read_text(), "canary")
+        # the links live in the sandbox home, never in the host state dir
+        self.assertEqual(
+            sorted(p.name for p in state_dir.iterdir()),
+            ["auth-pro.json", "sessions", "state.json"],
+        )
+
+    def test_hax_auth_profile_launched_above_state_dir(self) -> None:
+        """Keep the profile links off the host state dir the launch dir bind exposes."""
+        local_dir = self.fixture.home / ".local"
+        local_dir.mkdir()
+        state_dir = local_dir / "state/hax"
+
+        report = self.run_probe(
+            [Op("link", OpKind.READLINK, state_dir / "auth.json")],
+            agent="hax",
+            extra_env={
+                "SANDBOX_AGENT_HAX_AUTH": "pro",
+                "XDG_STATE_HOME": str(local_dir / "state"),
+            },
+            cwd=local_dir,
+        )
+
+        self.assertEqual(report["link"], str(HAX_PROFILE_STATE_DIR / "auth-pro.json"))
+        self.assertEqual(
+            sorted(p.name for p in state_dir.iterdir()), ["auth-pro.json", "sessions"]
+        )
+
+    @unittest.skipUnless(os.access(HAX_BIN, os.X_OK), "hax is not installed")
+    def test_hax_auth_profile_applies_to_extra_agent(self) -> None:
+        """Link the profile credentials of hax provisioned beside the launched agent."""
+        report = self.run_probe(
+            [
+                Op(
+                    "link",
+                    OpKind.READLINK,
+                    self.fixture.home / ".local/state/hax/auth.json",
+                )
+            ],
+            agent="claude",
+            extra_env={"SANDBOX_AGENT_HAX_AUTH": "pro"},
+        )
+
+        self.assertEqual(report["link"], str(HAX_PROFILE_STATE_DIR / "auth-pro.json"))
+
     def test_launch_inside_skill_dir_stays_writable(self) -> None:
         """Keep the launch dir writable when it is the agent's read-only skill dir."""
         (self.fixture.config_home / "agents/skills").mkdir(parents=True)
@@ -1348,6 +1442,22 @@ class ScratchModeTests(SandboxTestCase):
 
         report = self.run_probe(
             self.session_ops(sandbox_dir), agent="claude", cwd=self.tmp_project
+        )
+
+        self.assertEqual(report["entries"], [])
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual([p.name for p in host_dir.iterdir()], ["old.jsonl"])
+
+    def test_hax_auth_profile_session_dir_isolated(self) -> None:
+        """Hide the session history of a hax profile launch too."""
+        host_dir, sandbox_dir = self.session_dirs()["hax"]
+        self.plant_host_session(host_dir)
+
+        report = self.run_probe(
+            self.session_ops(sandbox_dir),
+            agent="hax",
+            extra_env={"SANDBOX_AGENT_HAX_AUTH": "pro"},
+            cwd=self.tmp_project,
         )
 
         self.assertEqual(report["entries"], [])

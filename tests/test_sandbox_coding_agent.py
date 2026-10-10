@@ -416,19 +416,37 @@ class SessionTmpfsMountsTests(unittest.TestCase):
         self.assertEqual(launcher.session_tmpfs_mounts([launcher.AgentSpec()]), [])
 
 
-class AuthProfileMountsTests(TempDirTestCase):
-    """Tests of the credentials mounts selecting an agent's auth profile."""
+class AuthProfilesTests(TempDirTestCase):
+    """Tests of the agent specs exposing the credentials of the selected auth profile."""
 
     def setUp(self) -> None:
-        """Build an agent spec whose credentials live in a temporary config directory."""
+        """Build agent specs whose credentials live in temporary config and state directories."""
         config_dir = self.make_temp_dir()
         self.credentials = config_dir / ".credentials.json"
         self.profile = config_dir / ".credentials-pro.json"
         self.sandbox_path = Path("/home/user/.claude/.credentials.json")
+        # the agent's own entries, which its credentials add to
+        own_mount = launcher.Mount(Path("/opt/agent"), launcher.MountKind.BIND_RO)
         self.spec = launcher.AgentSpec(
             credentials=launcher.Mount(
                 self.credentials, launcher.MountKind.BIND_RW, self.sandbox_path
-            )
+            ),
+            mounts=(own_mount,),
+        )
+        self.state_dir = self.make_temp_dir() / "hax"
+        self.sandbox_state_dir = Path("/home/user/.local/state/hax")
+        self.linked_spec = launcher.AgentSpec(
+            session_dir=self.sandbox_state_dir / "sessions",
+            credentials=launcher.LinkedCredentials(
+                launcher.Mount(
+                    self.state_dir, launcher.MountKind.BIND_RW, self.sandbox_state_dir
+                ),
+                "auth.json",
+                files=("state.json",),
+                dirs=("sessions",),
+            ),
+            mounts=(own_mount,),
+            symlinks=((Path("/opt/agent/bin/hax"), Path("/home/user/.local/bin/hax")),),
         )
 
     def resolve(
@@ -438,14 +456,14 @@ class AuthProfileMountsTests(TempDirTestCase):
         launched_agent: str = "claude",
         launched_args: collections.abc.Sequence[str] = (),
         **profiles: str,
-    ) -> list[launcher.Mount]:
-        """Resolve the auth profile mounts of agents, with only the given profiles selected."""
+    ) -> dict[str, launcher.AgentSpec]:
+        """Apply the auth profiles of agents, with only the given profiles selected."""
         env = {
             f"SANDBOX_AGENT_{name.upper()}_AUTH": profile
             for name, profile in profiles.items()
         }
         with unittest.mock.patch.dict(os.environ, env, clear=True):
-            return launcher.auth_profile_mounts(agents, launched_agent, launched_args)
+            return launcher.apply_auth_profiles(agents, launched_agent, launched_args)
 
     def resolve_report(
         self,
@@ -455,7 +473,7 @@ class AuthProfileMountsTests(TempDirTestCase):
         launched_args: collections.abc.Sequence[str] = (),
         **profiles: str,
     ) -> str:
-        """Resolve the auth profile mounts of agents, returning what the launcher reported."""
+        """Apply the auth profiles of agents, returning what the launcher reported."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             self.resolve(
@@ -474,7 +492,7 @@ class AuthProfileMountsTests(TempDirTestCase):
         launched_args: collections.abc.Sequence[str] = (),
         **profiles: str,
     ) -> str:
-        """Resolve the auth profile mounts of agents, returning what the aborted launch reported."""
+        """Apply the auth profiles of agents, returning what the aborted launch reported."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
             self.resolve(
@@ -485,9 +503,12 @@ class AuthProfileMountsTests(TempDirTestCase):
             )
         return stderr.getvalue()
 
-    def claude_mount(self, src: Path) -> list[launcher.Mount]:
-        """Return the single mount exposing src at the claude credentials path."""
-        return [launcher.Mount(src, launcher.MountKind.BIND_RW, self.sandbox_path)]
+    def with_credentials(
+        self, spec: launcher.AgentSpec, src: Path
+    ) -> launcher.AgentSpec:
+        """Return spec with src mounted at the credentials path after its own mounts."""
+        mount = launcher.Mount(src, launcher.MountKind.BIND_RW, self.sandbox_path)
+        return dataclasses.replace(spec, mounts=(*spec.mounts, mount))
 
     def test_credentials_of_known_agents(self) -> None:
         """Point every agent supporting auth profiles at its credentials file."""
@@ -505,7 +526,16 @@ class AuthProfileMountsTests(TempDirTestCase):
                     launcher.MountKind.BIND_RW,
                     FAKE_HOME / ".codex/auth.json",
                 ),
-                "hax": None,
+                "hax": launcher.LinkedCredentials(
+                    launcher.Mount(
+                        FIXTURE_ROOT / "state/hax",
+                        launcher.MountKind.BIND_RW,
+                        FAKE_HOME / ".local/state/hax",
+                    ),
+                    "auth.json",
+                    files=("state.json",),
+                    dirs=("sessions",),
+                ),
                 "pi": launcher.Mount(
                     FAKE_CONFIG_HOME / "pi/agent/auth.json",
                     launcher.MountKind.BIND_RW,
@@ -518,16 +548,18 @@ class AuthProfileMountsTests(TempDirTestCase):
         """Leave the agent's own credentials in place when no profile is selected."""
         self.credentials.write_text('{"token": "default"}')
 
-        self.assertEqual(self.resolve({"claude": self.spec}), [])
+        self.assertEqual(self.resolve({"claude": self.spec}), {"claude": self.spec})
         self.assertFalse(self.profile.exists())
 
     def test_seeds_new_profile_beside_default_credentials(self) -> None:
         """Create empty credentials for a new profile, never copying the default ones."""
         self.credentials.write_text('{"token": "default"}')
 
-        mounts = self.resolve({"claude": self.spec}, claude="pro")
+        specs = self.resolve({"claude": self.spec}, claude="pro")
 
-        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(
+            specs, {"claude": self.with_credentials(self.spec, self.profile)}
+        )
         self.assertEqual(self.profile.read_text(), "{}")
         self.assertEqual(self.profile.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.credentials.read_text(), '{"token": "default"}')
@@ -537,9 +569,11 @@ class AuthProfileMountsTests(TempDirTestCase):
         self.credentials.write_text('{"token": "default"}')
         self.profile.write_text('{"token": "pro"}')
 
-        mounts = self.resolve({"claude": self.spec}, claude="pro")
+        specs = self.resolve({"claude": self.spec}, claude="pro")
 
-        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(
+            specs, {"claude": self.with_credentials(self.spec, self.profile)}
+        )
         self.assertEqual(self.profile.read_text(), '{"token": "pro"}')
 
     def test_tolerates_a_concurrent_first_launch(self) -> None:
@@ -549,16 +583,20 @@ class AuthProfileMountsTests(TempDirTestCase):
 
         # the racing launcher wins between this one's absence check and its own create
         with unittest.mock.patch.object(Path, "exists", return_value=False):
-            mounts = self.resolve({"claude": self.spec}, claude="pro")
+            specs = self.resolve({"claude": self.spec}, claude="pro")
 
-        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(
+            specs, {"claude": self.with_credentials(self.spec, self.profile)}
+        )
         self.assertEqual(self.profile.read_text(), '{"token": "pro"}')
 
     def test_seeds_new_profile_without_default_credentials(self) -> None:
         """Create empty credentials for a new profile of an agent that is not logged in."""
-        mounts = self.resolve({"claude": self.spec}, claude="pro")
+        specs = self.resolve({"claude": self.spec}, claude="pro")
 
-        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(
+            specs, {"claude": self.with_credentials(self.spec, self.profile)}
+        )
         self.assertEqual(self.profile.read_text(), "{}")
         self.assertEqual(self.profile.stat().st_mode & 0o777, 0o600)
 
@@ -582,15 +620,17 @@ class AuthProfileMountsTests(TempDirTestCase):
             credentials=launcher.Mount(other, launcher.MountKind.BIND_RW)
         )
 
-        mounts = self.resolve({"claude": self.spec, "pi": pi_spec}, pi="perso")
+        specs = self.resolve({"claude": self.spec, "pi": pi_spec}, pi="perso")
 
+        profile_mount = launcher.Mount(
+            other.parent / "auth-perso.json", launcher.MountKind.BIND_RW
+        )
         self.assertEqual(
-            mounts,
-            [
-                launcher.Mount(
-                    other.parent / "auth-perso.json", launcher.MountKind.BIND_RW
-                )
-            ],
+            specs,
+            {
+                "claude": self.spec,
+                "pi": dataclasses.replace(pi_spec, mounts=(profile_mount,)),
+            },
         )
 
     def test_rejects_agent_without_credentials(self) -> None:
@@ -610,6 +650,34 @@ class AuthProfileMountsTests(TempDirTestCase):
                 "hax": None,
                 "pi": None,
             },
+        )
+
+    def test_empty_profile_notices_of_known_agents(self) -> None:
+        """Give a notice to the agents falling back on other credentials when logged out."""
+        self.assertEqual(
+            {
+                name
+                for name, spec in launcher.AGENTS.items()
+                if spec.empty_profile_notice is not None
+            },
+            {"hax"},
+        )
+
+    def test_starts_on_an_empty_profile_with_its_notice(self) -> None:
+        """Start an agent whose empty profile falls back on other credentials, saying so."""
+        spec = dataclasses.replace(self.spec, empty_profile_notice="it borrows a login")
+
+        report = self.resolve_report({"hax": spec}, launched_agent="hax", hax="pro")
+
+        self.assertIn("Hax auth profile 'pro' is empty, it borrows a login", report)
+
+    def test_drops_the_notice_once_the_profile_is_logged_in(self) -> None:
+        """Stay quiet once the profile of an agent with an empty profile notice holds a login."""
+        spec = dataclasses.replace(self.spec, empty_profile_notice="it borrows a login")
+        self.profile.write_text('{"token": "pro"}')
+
+        self.assertEqual(
+            self.resolve_report({"hax": spec}, launched_agent="hax", hax="pro"), ""
         )
 
     def test_refuses_to_start_the_launched_agent_on_an_empty_profile(self) -> None:
@@ -633,14 +701,14 @@ class AuthProfileMountsTests(TempDirTestCase):
         stderr = io.StringIO()
 
         with contextlib.redirect_stderr(stderr):
-            mounts = self.resolve(
+            specs = self.resolve(
                 {"codex": spec},
                 launched_agent="codex",
                 launched_args=("login",),
                 codex="pro",
             )
 
-        self.assertEqual(mounts, self.claude_mount(self.profile))
+        self.assertEqual(specs, {"codex": self.with_credentials(spec, self.profile)})
         self.assertEqual(stderr.getvalue(), "")
 
     def test_starts_a_login_carrying_its_own_arguments(self) -> None:
@@ -716,6 +784,64 @@ class AuthProfileMountsTests(TempDirTestCase):
     def test_reports_nothing_for_an_agent_starting_logged_out(self) -> None:
         """Stay quiet for an agent whose own login flow handles empty credentials."""
         self.assertEqual(self.resolve_report({"claude": self.spec}, claude="pro"), "")
+
+    def test_binds_linked_state_dir_without_profile(self) -> None:
+        """Expose the state dir holding linked credentials at its own location by default."""
+        state_mount = launcher.Mount(
+            self.state_dir, launcher.MountKind.BIND_RW, self.sandbox_state_dir
+        )
+
+        self.assertEqual(
+            self.resolve({"hax": self.linked_spec}),
+            {
+                "hax": dataclasses.replace(
+                    self.linked_spec, mounts=(*self.linked_spec.mounts, state_mount)
+                )
+            },
+        )
+
+    def test_mounts_profile_entries_back_from_moved_state_dir(self) -> None:
+        """Move the state dir aside, bind its dirs and link its files back on a tmpfs."""
+        self.state_dir.mkdir()
+        (self.state_dir / "auth.json").write_text('{"token": "default"}')
+        moved = Path("/run/sandbox-coding-agent/hax-state")
+
+        specs = self.resolve({"hax": self.linked_spec}, hax="work")
+
+        self.assertEqual(
+            specs,
+            {
+                "hax": dataclasses.replace(
+                    self.linked_spec,
+                    mounts=(
+                        *self.linked_spec.mounts,
+                        launcher.Mount(
+                            self.state_dir, launcher.MountKind.BIND_RW, moved
+                        ),
+                        launcher.Mount(
+                            self.sandbox_state_dir, launcher.MountKind.TMPFS
+                        ),
+                        launcher.Mount(
+                            self.state_dir / "sessions",
+                            launcher.MountKind.BIND_RW,
+                            self.sandbox_state_dir / "sessions",
+                        ),
+                    ),
+                    symlinks=(
+                        *self.linked_spec.symlinks,
+                        (
+                            moved / "auth-work.json",
+                            self.sandbox_state_dir / "auth.json",
+                        ),
+                        (moved / "state.json", self.sandbox_state_dir / "state.json"),
+                    ),
+                )
+            },
+        )
+        self.assertEqual((self.state_dir / "auth-work.json").read_text(), "{}")
+        self.assertEqual(
+            (self.state_dir / "auth.json").read_text(), '{"token": "default"}'
+        )
 
 
 class MemfdDataTests(unittest.TestCase):

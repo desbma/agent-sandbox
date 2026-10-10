@@ -116,6 +116,24 @@ class File:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class LinkedCredentials:
+    """Credentials file inside an agent's state dir, with the dir's other entries."""
+
+    state_dir: Mount
+    # credentials file name in the state dir
+    name: str
+    # names of the other files and of the dirs the agent keeps in the state dir, the only
+    # entries persisted under an auth profile
+    files: tuple[str, ...]
+    dirs: tuple[str, ...]
+
+    @property
+    def src(self) -> Path:
+        """Return the host path of the default credentials file."""
+        return self.state_dir.src / self.name
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class AgentSpec:
     """Sandbox provisioning specific to a coding agent, empty for an unknown one."""
 
@@ -123,10 +141,13 @@ class AgentSpec:
     agents_md: Path | None = None
     # sandbox dir holding the agent's session history, None when it keeps none
     session_dir: Path | None = None
-    # credentials file mount, None for agents without auth profile support
-    credentials: Mount | None = None
+    # credentials file, None for agents without auth profile support
+    credentials: Mount | LinkedCredentials | None = None
     # arguments of the agent's own login command, None when it starts fine on empty credentials
     login_args: tuple[str, ...] | None = None
+    # what the agent falls back on with empty credentials, None when it starts logged out or
+    # login_args refuses them
+    empty_profile_notice: str | None = None
     mounts: tuple[Mount, ...] = ()
     # symlink target to link path
     symlinks: tuple[tuple[Path, Path], ...] = ()
@@ -302,23 +323,55 @@ def runs_login(
     )
 
 
-def auth_profile_mounts(
+def linked_profile_spec(
+    name: str, spec: AgentSpec, linked: LinkedCredentials, credentials: Path
+) -> AgentSpec:
+    """Return spec with its state dir moved aside and its entries exposed back, credentials as the profile's."""
+    moved = LAUNCHER_RUN_DIR / f"{name}-state"
+    link_dir = linked.state_dir.target
+    mounts = (
+        dataclasses.replace(linked.state_dir, dst=moved),
+        # sandbox-private even when the launch dir bind spans it
+        Mount(link_dir, MountKind.TMPFS),
+        # bound rather than linked, an agent may reject a symlinked dir
+        *(
+            Mount(linked.state_dir.src / d, MountKind.BIND_RW, link_dir / d)
+            for d in linked.dirs
+        ),
+    )
+    links = (
+        (moved / credentials.name, link_dir / linked.name),
+        *((moved / file, link_dir / file) for file in linked.files),
+    )
+    return dataclasses.replace(
+        spec,
+        mounts=(*spec.mounts, *mounts),
+        symlinks=(*spec.symlinks, *links),
+    )
+
+
+def apply_auth_profiles(
     agents: collections.abc.Mapping[str, AgentSpec],
     launched_agent: str,
     launched_args: collections.abc.Sequence[str],
-) -> list[Mount]:
-    """Return each agent's selected profile mounts."""
-    mounts = []
+) -> dict[str, AgentSpec]:
+    """Return each agent's spec exposing the credentials of its selected auth profile, if any."""
+    applied = dict(agents)
     for name, spec in agents.items():
         profile_var = f"SANDBOX_AGENT_{name.upper()}_AUTH"
         profile = os.environ.get(profile_var)
         if profile is None:
+            if isinstance(spec.credentials, LinkedCredentials):
+                applied[name] = dataclasses.replace(
+                    spec, mounts=(*spec.mounts, spec.credentials.state_dir)
+                )
             continue
         if spec.credentials is None:
             fatal_error(f"Agent {name!r} does not support auth profiles")
         credentials = profile_credentials(spec.credentials.src, profile)
+        empty = credentials.read_text() == EMPTY_CREDENTIALS
         login_args = spec.login_args
-        if (login_args is not None) and (credentials.read_text() == EMPTY_CREDENTIALS):
+        if empty and (login_args is not None):
             logging_in = (name == launched_agent) and runs_login(
                 launched_args, login_args
             )
@@ -330,8 +383,18 @@ def auth_profile_mounts(
                 fatal_error(
                     f"{name.title()} auth profile {profile!r} is empty, run `{command}`"
                 )
-        mounts.append(dataclasses.replace(spec.credentials, src=credentials))
-    return mounts
+        if empty and (spec.empty_profile_notice is not None):
+            show_message(
+                f"{name.title()} auth profile {profile!r} is empty, {spec.empty_profile_notice}"
+            )
+        if isinstance(spec.credentials, LinkedCredentials):
+            applied[name] = linked_profile_spec(
+                name, spec, spec.credentials, credentials
+            )
+        else:
+            mount = dataclasses.replace(spec.credentials, src=credentials)
+            applied[name] = dataclasses.replace(spec, mounts=(*spec.mounts, mount))
+    return applied
 
 
 def vcs_dirs(cwd: Path, repo_info: RepoInfo | None) -> list[Path]:
@@ -736,9 +799,12 @@ CLAUDE_MD_MAX_DEPTH = 2
 # maximum levels a project's shared dirs may sit above a workspace root before sharing is dropped
 SHARED_DIR_MAX_PREFIX_DEPTH_DELTA = 2
 
+# sandbox dir of the launcher's own runtime paths
+LAUNCHER_RUN_DIR = Path("/run/sandbox-coding-agent")
+
 # host CPU topology, read from sysfs and handed to the guest microvm launcher
 SYS_CPU_DIR = Path("/sys/devices/system/cpu")
-CPU_TOPOLOGY_PATH = Path("/run/sandbox-coding-agent/cpu-topology")
+CPU_TOPOLOGY_PATH = LAUNCHER_RUN_DIR / "cpu-topology"
 
 # static mounts in sandbox
 MOUNTS: list[Mount] = [
@@ -866,7 +932,7 @@ AGENTS: dict[str, AgentSpec] = {
             Mount(XDG_CONFIG_HOME / "claude", MountKind.BIND_RW, HOME / ".claude"),
             Mount(Path("/opt/claude-code"), MountKind.BIND_RO),
         ),
-        # the dict is built whatever the launched agent is, but only its own symlinks are used
+        # the dict is built whatever the launched agent is, but these links only serve claude
         symlinks=claude_md_symlinks(CWD) if AGENT == "claude" else (),
         # put claude.json, its lock and its rename staging in the host-backed config dir
         env={"CLAUDE_CONFIG_DIR": str(HOME / ".claude")}
@@ -917,6 +983,14 @@ AGENTS: dict[str, AgentSpec] = {
     "hax": AgentSpec(
         agents_md=HOME / ".config/hax/AGENTS.md",
         session_dir=HOME / ".local/state/hax/sessions",
+        # hax replaces its credentials by rename, which fails on a file bind mount
+        credentials=LinkedCredentials(
+            Mount(XDG_STATE_HOME / "hax", MountKind.BIND_RW, HOME / ".local/state/hax"),
+            "auth.json",
+            files=("state.json",),
+            dirs=("sessions",),
+        ),
+        empty_profile_notice="hax uses any codex CLI login until /login",
         mounts=(
             Mount(
                 XDG_CONFIG_HOME / "agents/skills",
@@ -930,7 +1004,6 @@ AGENTS: dict[str, AgentSpec] = {
                 MountKind.BIND_RO,
                 HOME / ".config/hax/skills",
             ),
-            Mount(XDG_STATE_HOME / "hax", MountKind.BIND_RW, HOME / ".local/state/hax"),
         ),
         provision_always=(Path("/usr/bin/hax"),),
     ),
@@ -1033,8 +1106,13 @@ if __name__ == "__main__":
 
     # agents provisioned in the sandbox: the launched one and any installed always-on extra
     extras = resolve_extra_agents(AGENT)
-    launched_spec = AGENTS.get(AGENT, AgentSpec())
-    agents = {AGENT: launched_spec} | {name: AGENTS[name] for name in extras}
+    agents = apply_auth_profiles(
+        {AGENT: AGENTS.get(AGENT, AgentSpec())}
+        | {name: AGENTS[name] for name in extras},
+        AGENT,
+        args[1:],
+    )
+    launched_spec = agents[AGENT]
 
     # dirs shared with the host, keyed on the project and shared across a jj repo's workspaces
     exchange_dir: Path | None = None
@@ -1064,7 +1142,6 @@ if __name__ == "__main__":
     layout_mounts = [
         *MOUNTS,
         *(mount for spec in agents.values() for mount in spec.mounts),
-        *auth_profile_mounts(agents, AGENT, args[1:]),
         *shared_dir_mounts,
         *(session_tmpfs_mounts(agents.values()) if SCRATCH_MODE else []),
         *cargo_target_mounts(),
@@ -1118,9 +1195,12 @@ if __name__ == "__main__":
         bwrap_args += ["--ro-bind-data", str(fd), str(path)]
 
     # symlinks
-    for target, link in (SYMLINKS | dict(launched_spec.symlinks)).items():
-        if target.exists():
-            bwrap_args += ["--symlink", str(target), str(link)]
+    host_symlinks = [
+        (target, link) for target, link in SYMLINKS.items() if target.exists()
+    ]
+    agent_symlinks = [pair for spec in agents.values() for pair in spec.symlinks]
+    for target, link in [*host_symlinks, *agent_symlinks]:
+        bwrap_args += ["--symlink", str(target), str(link)]
 
     # env
     prefixes = tuple(f"{name.upper()}_" for name in agents)

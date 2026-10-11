@@ -606,31 +606,43 @@ class EnvironmentTests(SandboxTestCase):
         self.assertIsNone(report["secret"])
         self.assertIsNone(report["gh_token"])
 
-    def test_agent_prefix_forwarding_follows_agent_name(self) -> None:
-        """Forward only the env vars prefixed with a provisioned agent's name."""
+    def test_agent_env_forwarding_follows_provisioned_agents(self) -> None:
+        """Forward the env vars of the provisioned agents only."""
         self.make_executable(self.fixture.home / ".local/libexec/pi/pi")
-        (self.fixture.config_home / "codex").mkdir()
-        (self.fixture.config_home / "codex/config.toml").write_text('model = "test"\n')
+        # the launcher holds codex back while its selected profile is empty
+        profile = self.fixture.config_home / "codex/auth-pro.json"
+        profile.parent.mkdir()
+        profile.write_text('{"OPENAI_API_KEY": "fixture-api-key"}')
 
         report = self.run_probe(
             [
-                Op("ps1", OpKind.ENV, "PS1"),
                 Op("codex_visible", OpKind.ENV, "CODEX_VISIBLE"),
                 Op("pi_visible", OpKind.ENV, "PI_VISIBLE"),
                 Op("claude_visible", OpKind.ENV, "CLAUDE_VISIBLE"),
+                Op("codex_auth", OpKind.ENV, "SANDBOX_AGENT_CODEX_AUTH"),
+                Op("pi_auth", OpKind.ENV, "SANDBOX_AGENT_PI_AUTH"),
+                Op("claude_auth", OpKind.ENV, "SANDBOX_AGENT_CLAUDE_AUTH"),
+                Op("auth_lookalike", OpKind.ENV, "SANDBOX_AGENT_CODEX_AUTH_EXTRA"),
             ],
             agent="codex",
             extra_env={
                 "CODEX_VISIBLE": "yes",
                 "PI_VISIBLE": "yes",
                 "CLAUDE_VISIBLE": "yes",
+                "SANDBOX_AGENT_CODEX_AUTH": "pro",
+                "SANDBOX_AGENT_PI_AUTH": "work",
+                "SANDBOX_AGENT_CLAUDE_AUTH": "pro",
+                "SANDBOX_AGENT_CODEX_AUTH_EXTRA": "canary",
             },
         )
 
-        self.assertEqual(report["ps1"], "codex-sandbox$ ")
         self.assertEqual(report["codex_visible"], "yes")
         self.assertEqual(report["pi_visible"], "yes")
         self.assertIsNone(report["claude_visible"])
+        self.assertEqual(report["codex_auth"], "pro")
+        self.assertEqual(report["pi_auth"], "work")
+        self.assertIsNone(report["claude_auth"])
+        self.assertIsNone(report["auth_lookalike"])
 
     def test_proxy_routing_when_ca_bundle_present(self) -> None:
         """Route gh through the auth proxy when its CA bundle exists."""

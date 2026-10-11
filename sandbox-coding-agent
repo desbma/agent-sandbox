@@ -354,6 +354,11 @@ def linked_profile_spec(
     )
 
 
+def auth_profile_var(agent: str) -> str:
+    """Return the name of the env var selecting an agent's auth profile."""
+    return f"SANDBOX_AGENT_{agent.upper()}_AUTH"
+
+
 def apply_auth_profiles(
     agents: collections.abc.Mapping[str, AgentSpec],
     launched_agent: str,
@@ -362,7 +367,7 @@ def apply_auth_profiles(
     """Return each agent's spec exposing the credentials of its selected auth profile, if any."""
     applied = dict(agents)
     for name, spec in agents.items():
-        profile_var = f"SANDBOX_AGENT_{name.upper()}_AUTH"
+        profile_var = auth_profile_var(name)
         profile = os.environ.get(profile_var)
         if profile is None:
             if isinstance(spec.credentials, LinkedCredentials):
@@ -1207,10 +1212,11 @@ if __name__ == "__main__":
 
     # env
     prefixes = tuple(f"{name.upper()}_" for name in agents)
+    exact_names = {*ENV_FORWARD, *map(auth_profile_var, agents)}
     forwarded = {
-        env_k: os.environ[env_k]
-        for env_k in ENV_FORWARD + [k for k in os.environ if k.startswith(prefixes)]
-        if env_k in os.environ
+        env_k: env_v
+        for env_k, env_v in os.environ.items()
+        if (env_k in exact_names) or env_k.startswith(prefixes)
     }
     bwrap_args.append("--clearenv")
     # forwarded last: a host value overrides what the sandbox sets for the same variable

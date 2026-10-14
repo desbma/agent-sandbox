@@ -88,11 +88,22 @@ Replace `/usr/bin/claude` by the location of the main Claude Code binary. Use `~
 
 ## `agent-proxy`
 
-An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets [`gh`](https://github.com/cli/cli) reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher sets `HTTPS_PROXY` for the whole sandbox, so the traffic of every HTTPS client that honors it goes through the proxy: requests to `api.github.com` are intercepted, other hosts are tunneled untouched.
-The proxy also enables TCP keepalive and a timeout for unacknowledged data on its upstream connections, so a client whose connection's network path silently died, typically across a laptop suspend, gets an error instead of hanging.
-The proxy is no way around the sandbox's network isolation: it refuses to connect to the host's loopback, whatever the spelling of the address (`localhost`, `0.0.0.0`, `[::ffff:127.0.0.1]`, etc.).
+### Features
 
-Setup, on the host:
+- Authenticates [`gh`](https://github.com/cli/cli) to the GitHub API without the sandbox ever seeing the token, and passes other traffic unchanged
+- Keeps the token encrypted at rest, as a systemd credential
+- Detects silently dead upstream connections (ie. across a laptop suspend): clients get an error instead of hanging
+- Can not be used to get around the sandbox's network isolation: connections to the host's loopback are refused, whatever the address spelling (`localhost`, `0.0.0.0`, `[::ffff:127.0.0.1]`, etc.)
+
+### Requirements
+
+- [mitmproxy](https://mitmproxy.org/) (`mitmdump`)
+- Python 3.13+
+- systemd 256+, for user-scoped encrypted credentials (`systemd-creds --user`)
+
+### Usage
+
+On the host:
 
 ```sh
 install -Dm755 agent-proxy/agent-proxy ~/.local/bin/agent-proxy

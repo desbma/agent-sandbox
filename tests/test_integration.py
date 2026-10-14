@@ -1,21 +1,27 @@
 """Start real bubblewrap sandboxes to exercise the sandbox-coding-agent launcher."""
 
 import collections.abc
+import concurrent.futures
 import dataclasses
+import errno
 import grp
 import json
 import os
 import pwd
+import random
 import re
+import select
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Self
 
-from sandbox_probe import Op, OpKind
+from sandbox_probe import SERVER_GREETING, Op, OpKind
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "sandbox-coding-agent"
 PROBE_SOURCE = Path(__file__).resolve().parent / "sandbox_probe.py"
@@ -39,6 +45,11 @@ SYS_CPU_ONLINE = Path("/sys/devices/system/cpu/online")
 HAX_BIN = Path("/usr/bin/hax")
 # sandbox path of the host hax state dir under an auth profile
 HAX_PROFILE_STATE_DIR = Path("/run/sandbox-coding-agent/hax-state")
+# the port the launcher forwards to agent-proxy (its PROXY_PORT constant)
+PROXY_PORT = 8085
+# ports outside the ephemeral range, which pasta's automatic forwarding skips
+FORWARDABLE_PORTS = range(20000, 30000)
+POLL_SECONDS = 0.1
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -90,6 +101,13 @@ class SandboxFixture:
         """Return the slug the launcher derives for the project."""
         return "-".join(p.lower() for p in (self.root.name, "project"))
 
+    def create_proxy_ca_bundle(self) -> Path:
+        """Create the agent-proxy CA bundle the launcher checks for, and return its path."""
+        bundle = self.runtime_dir / "agent-proxy/ca-bundle.crt"
+        bundle.parent.mkdir()
+        bundle.write_text("FAKE CA")
+        return bundle
+
     def exchange_dir(self) -> Path:
         """Return the exchange directory path the launcher derives for the project."""
         return self.runtime_dir / "agents" / self.project_slug()
@@ -121,6 +139,50 @@ class SandboxFixture:
                 "/usr/bin",
             )
         )
+
+
+def bind_forwardable_port(
+    host: str,
+    *,
+    family: socket.AddressFamily = socket.AF_INET,
+    kind: socket.SocketKind = socket.SOCK_STREAM,
+) -> socket.socket:
+    """Return a socket bound to host on a random free port outside the ephemeral range."""
+    while True:
+        sock = socket.socket(family, kind)
+        try:
+            sock.bind((host, random.choice(FORWARDABLE_PORTS)))
+        except OSError as exc:
+            sock.close()
+            if exc.errno != errno.EADDRINUSE:
+                raise
+        else:
+            return sock
+
+
+def default_gateway() -> str:
+    """Return the host's default IPv4 gateway."""
+    for line in Path("/proc/net/route").read_text().splitlines()[1:]:
+        _interface, destination, gateway, *_ = line.split()
+        if destination == "00000000":
+            return socket.inet_ntoa(int(gateway, 16).to_bytes(4, "little"))
+    raise RuntimeError("No default IPv4 route on the host")
+
+
+def read_greeting(
+    port: int, probe: concurrent.futures.Future[dict[str, object]]
+) -> bytes:
+    """Connect to a host loopback port until a server listens there while the probe runs, and return what it sends."""
+    while not probe.done():
+        try:
+            with socket.create_connection(
+                ("127.0.0.1", port), timeout=LAUNCH_TIMEOUT_SECONDS
+            ) as client:
+                return client.recv(len(SERVER_GREETING))
+        except ConnectionRefusedError:
+            time.sleep(POLL_SECONDS)
+    probe.result()
+    raise RuntimeError(f"Nothing listened on 127.0.0.1:{port} while the probe ran")
 
 
 @unittest.skipUnless(INTEGRATION_ENABLED, SKIP_REASON)
@@ -646,9 +708,7 @@ class EnvironmentTests(SandboxTestCase):
 
     def test_proxy_routing_when_ca_bundle_present(self) -> None:
         """Route gh through the auth proxy when its CA bundle exists."""
-        bundle = self.fixture.runtime_dir / "agent-proxy/ca-bundle.crt"
-        bundle.parent.mkdir()
-        bundle.write_text("FAKE CA")
+        bundle = self.fixture.create_proxy_ca_bundle()
 
         report = self.run_probe(
             [
@@ -664,7 +724,7 @@ class EnvironmentTests(SandboxTestCase):
         )
 
         self.assertEqual(report["GH_TOKEN"], "agent-proxy-placeholder")
-        self.assertEqual(report["HTTPS_PROXY"], "http://127.0.0.1:8085")
+        self.assertEqual(report["HTTPS_PROXY"], f"http://127.0.0.1:{PROXY_PORT}")
         self.assertEqual(report["NO_PROXY"], "127.0.0.1,localhost")
         self.assertEqual(report["SSL_CERT_FILE"], str(bundle))
         self.assertEqual(report["bundle"], "FAKE CA")
@@ -673,6 +733,93 @@ class EnvironmentTests(SandboxTestCase):
             "`gh` is available and authenticated",
             self.report_str(report, "claude_md"),
         )
+
+
+class NetworkTests(SandboxTestCase):
+    """Tests of what the sandbox reaches on the network, and what reaches it."""
+
+    def test_host_loopback_unreachable(self) -> None:
+        """Keep host loopback TCP, UDP and abstract unix listeners out of reach, even through the gateway address."""
+        abstract_name = f"\0{self.fixture.root.name}"
+        with (
+            bind_forwardable_port("127.0.0.1") as tcp4,
+            bind_forwardable_port("::1", family=socket.AF_INET6) as tcp6,
+            bind_forwardable_port("127.0.0.1", kind=socket.SOCK_DGRAM) as udp,
+            socket.socket(socket.AF_UNIX) as unix,
+        ):
+            unix.bind(abstract_name)
+            for listener in (tcp4, tcp6, unix):
+                listener.listen()
+            tcp4_port = tcp4.getsockname()[1]
+
+            self.run_probe(
+                [
+                    Op("tcp4", OpKind.TCP_CONNECT, f"127.0.0.1:{tcp4_port}"),
+                    Op("tcp6", OpKind.TCP_CONNECT, f"::1:{tcp6.getsockname()[1]}"),
+                    Op(
+                        "gateway",
+                        OpKind.TCP_CONNECT,
+                        f"{default_gateway()}:{tcp4_port}",
+                    ),
+                    Op("udp", OpKind.UDP_SEND, f"127.0.0.1:{udp.getsockname()[1]}"),
+                    Op("unix", OpKind.UNIX_CONNECT, abstract_name),
+                ],
+                agent="claude",
+            )
+            readable, _, _ = select.select([tcp4, tcp6, udp, unix], [], [], 0)
+
+        self.assertEqual(readable, [])
+
+    def test_dns_port_and_internet_reachable(self) -> None:
+        """Reach the DNS port of host loopback, and internet hosts by name."""
+        report = self.run_probe(
+            [
+                Op("dns", OpKind.TCP_CONNECT, "127.0.0.53:53"),
+                Op("internet", OpKind.TCP_CONNECT, "example.com:443"),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(report["dns"], "ok")
+        self.assertEqual(report["internet"], "ok")
+
+    def test_proxy_port_reachable_when_ca_bundle_present(self) -> None:
+        """Reach the agent-proxy port of host loopback when its CA bundle exists."""
+        self.fixture.create_proxy_ca_bundle()
+        try:
+            proxy = socket.create_server(("127.0.0.1", PROXY_PORT))
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            self.skipTest(
+                f"Host loopback port {PROXY_PORT} is taken, as by agent-proxy"
+            )
+
+        with proxy:
+            report = self.run_probe(
+                [Op("proxy", OpKind.TCP_CONNECT, f"127.0.0.1:{PROXY_PORT}")],
+                agent="claude",
+            )
+            readable, _, _ = select.select([proxy], [], [], LAUNCH_TIMEOUT_SECONDS)
+
+        self.assertEqual(report["proxy"], "ok")
+        self.assertEqual(readable, [proxy])
+
+    def test_sandbox_server_reachable_from_host_loopback(self) -> None:
+        """Forward host loopback connections to a server on the same sandbox loopback port."""
+        with bind_forwardable_port("127.0.0.1") as free:
+            port = free.getsockname()[1]
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            probe = executor.submit(
+                self.run_probe,
+                [Op("serve", OpKind.SERVE, f"127.0.0.1:{port}")],
+                agent="claude",
+            )
+            greeting = read_greeting(port, probe)
+
+        self.assertEqual(probe.result()["serve"], "ok")
+        self.assertEqual(greeting, SERVER_GREETING)
 
 
 class InstructionsTests(SandboxTestCase):
@@ -1567,6 +1714,22 @@ class LaunchPolicyTests(SandboxTestCase):
 
         self.assertEqual(report["cwd"], str(subdir))
 
+    def test_runs_as_host_user(self) -> None:
+        """Run the agent with the host user and group ids."""
+        report = self.run_probe([Op("ids", OpKind.IDS)], agent="claude")
+
+        self.assertEqual(report["ids"], [str(os.getuid()), str(os.getgid())])
+
+    def test_no_signal_blocked(self) -> None:
+        """Start the agent with no signal blocked."""
+        report = self.run_probe(
+            [Op("status", OpKind.READ, "/proc/self/status")], agent="claude"
+        )
+
+        self.assertIn(
+            "\nSigBlk:\t0000000000000000\n", self.report_str(report, "status")
+        )
+
     def test_exit_code_propagates(self) -> None:
         """Propagate the agent's exit status back to the launcher caller."""
         result = self.run_launcher(agent="claude", exit_code=7)
@@ -1616,14 +1779,15 @@ class LaunchPolicyTests(SandboxTestCase):
 
         self.assertEqual(report["editor"], True)
 
-    def test_debug_mode_prints_bwrap_command(self) -> None:
-        """Print the assembled bwrap command on stderr in debug mode."""
+    def test_debug_mode_prints_sandbox_command(self) -> None:
+        """Print the assembled pasta and bwrap commands on stderr in debug mode."""
         result = self.run_launcher(
             agent="claude", extra_env={"SANDBOX_AGENT_DEBUG": "1"}
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertTrue(result.stderr.startswith("bwrap --unshare-all --share-net"))
+        self.assertTrue(result.stderr.startswith("pasta --config-net"))
+        self.assertIn("\nbwrap --unshare-all --share-net", result.stderr)
         self.assertIn("--clearenv", result.stderr)
         self.assertIn("--die-with-parent", result.stderr)
 

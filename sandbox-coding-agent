@@ -595,6 +595,32 @@ def memfd_data(data: bytes) -> int:
     return fd
 
 
+def enter_network_namespace(pasta_args: list[str]) -> None:
+    """Move this process into new user and network namespaces, and have pasta connect them to the host's network."""
+    uid, gid = os.getuid(), os.getgid()
+    ready, release = os.pipe()
+    helper = os.fork()
+    if helper == 0:
+        # pasta starts from the host's namespaces, once this process has left them
+        os.close(release)
+        os.read(ready, 1)
+        try:
+            os.execv("/usr/bin/pasta", pasta_args)
+        except FileNotFoundError:
+            show_message("Missing /usr/bin/pasta: install passt, which provides it")
+        os._exit(1)
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET)
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/uid_map").write_text(f"{uid} {uid} 1")
+    Path("/proc/self/gid_map").write_text(f"{gid} {gid} 1")
+    # unprivileged ICMP sockets, as the host's namespace usually allows
+    Path("/proc/sys/net/ipv4/ping_group_range").write_text(f"{gid} {gid}")
+    os.close(release)
+    _, status = os.waitpid(helper, 0)
+    if os.waitstatus_to_exitcode(status) != 0:
+        fatal_error("Failed to set up the sandbox network")
+
+
 def nss_entries[T](
     lookup: collections.abc.Callable[[str], T], names: list[str]
 ) -> list[T]:
@@ -764,7 +790,8 @@ XDG_STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
 
 # auth-injecting proxy, running on the host only while its user service is up
 PROXY_CA_BUNDLE = XDG_RUNTIME_DIR / "agent-proxy/ca-bundle.crt"
-PROXY_ADDRESS = "127.0.0.1:8085"
+PROXY_PORT = "8085"
+PROXY_ADDRESS = f"127.0.0.1:{PROXY_PORT}"
 GH_PLACEHOLDER_TOKEN = "agent-proxy-placeholder"
 PROXY_ACTIVE = PROXY_CA_BUNDLE.is_file()
 PROXY_MOUNTS: list[Mount] = (
@@ -886,7 +913,7 @@ GLOBAL_AGENTS_MD_INTRO = f"""## Sandbox environment
 You are running in a `bwrap` based sandbox, set up by the `{LAUNCHER_HOST_PATH}` script on the host. `{LAUNCHER_COPY_PATH}` is a read-only copy of that script, taken at launch: read it only when this section does not answer a question about how the sandbox works (mounts, generated paths, auth profiles, why an operation is denied), and search it for the relevant part rather than reading it whole.
 
 - Do not attempt to directly run commands that require privileges (`sudo`, `su`, etc.), they would fail. If you need to do so, use the `agent-microvm` skill.
-- You have unrestricted network access."""
+- You have internet and LAN access, but the host's loopback services are out of reach, except its DNS resolver and, when `HTTPS_PROXY` is set, the proxy it names: `localhost` is the sandbox's own, and so is the host's main IP address. A TCP server listening in the sandbox on `127.0.0.1`, `0.0.0.0` or `::` becomes reachable at the host's `127.0.0.1` on the same port within a second, unless that port is below 1024, in the host's ephemeral range (32768-60999 by default), or already used on the host."""
 
 # tools to expose in sandbox, even if not under /usr
 HOME_TOOLS = [
@@ -1094,9 +1121,29 @@ FILES: dict[Path, File] = {
     ),
 }
 
+# network setup of the launcher's own namespace, given its PID: a copy of the host's interfaces,
+# reaching host loopback only on the DNS port and the proxy's, with sandbox servers reachable
+# from host 127.0.0.1
+PASTA_ARGS = [
+    "pasta",
+    "--config-net",
+    "--quiet",
+    "-t",
+    "127.0.0.1/auto",
+    "--host-lo-to-ns-lo",
+    "-u",
+    "none",
+    "-T",
+    f"53,{PROXY_PORT}" if PROXY_ACTIVE else "53",
+    "-U",
+    "53",
+    "--no-map-gw",
+]
+
 BWRAP_BASE_ARGS = [
     "bwrap",
     "--unshare-all",
+    # the launcher's network namespace, set up by pasta
     "--share-net",
     "--dev",
     "/dev",
@@ -1231,6 +1278,8 @@ if __name__ == "__main__":
         *(("bash",) if DEBUG else args),
     ]
 
+    pasta_args = [*PASTA_ARGS, str(os.getpid())]
     if DEBUG:
-        sys.stderr.write(shlex.join(bwrap_args) + "\n")
+        sys.stderr.write(f"{shlex.join(pasta_args)}\n{shlex.join(bwrap_args)}\n")
+    enter_network_namespace(pasta_args)
     os.execv("/usr/bin/bwrap", bwrap_args)

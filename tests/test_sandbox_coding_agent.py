@@ -1219,6 +1219,21 @@ class ProxyTests(unittest.TestCase):
                 "SSL_CERT_FILE": str(bundle),
             },
         )
+        self.assertEqual(
+            module.PASTA_ARGS[module.PASTA_ARGS.index("-T") + 1], "53,8085"
+        )
+
+
+class NetworkTests(unittest.TestCase):
+    """Tests of the sandbox network namespace setup."""
+
+    def test_pasta_reaches_only_dns_on_host_loopback(self) -> None:
+        """Cut the sandbox off from host loopback but its DNS port, and forward sandbox servers back to it."""
+        expected = (
+            "pasta --config-net --quiet -t 127.0.0.1/auto --host-lo-to-ns-lo "
+            "-u none -T 53 -U 53 --no-map-gw"
+        )
+        self.assertEqual(launcher.PASTA_ARGS, expected.split())
 
 
 class ToolPathsTests(TempDirTestCase):

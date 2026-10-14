@@ -54,9 +54,11 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap=$(nix build --no-link --print-out-paths "$NIXPKGS#bubblewrap")/bin/bwrap
+          pasta=$(nix build --no-link --print-out-paths "$NIXPKGS#passt")/bin/pasta
           jj=$(nix build --no-link --print-out-paths "$NIXPKGS#jujutsu")/bin/jj
           mitmdump=$(nix build --no-link --print-out-paths "$NIXPKGS#mitmproxy")/bin/mitmdump
           sudo ln -sf "$bwrap" /usr/bin/bwrap
+          sudo ln -sf "$pasta" /usr/bin/pasta
           sudo ln -sf "$jj" /usr/bin/jj
           sudo ln -sf "$mitmdump" /usr/bin/mitmdump
       - run: python3 -m unittest discover -s tests -v

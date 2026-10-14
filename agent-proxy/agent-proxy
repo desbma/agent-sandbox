@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import ipaddress
 import os
 import re
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Concatenate
 
 if TYPE_CHECKING:
     import collections.abc
@@ -42,6 +43,49 @@ def github_token() -> str:
     )
 
 
+def reaches_loopback(address: str) -> bool:
+    """Tell whether connecting to a numeric IP address lands on this host's loopback."""
+    ip = ipaddress.ip_address(address)
+    return ip.is_loopback or ip.is_unspecified
+
+
+def with_loopback_refusal[**P](
+    open_connection: collections.abc.Callable[
+        Concatenate[str, int, P], collections.abc.Awaitable[Streams]
+    ],
+) -> collections.abc.Callable[
+    Concatenate[str, int, P], collections.abc.Awaitable[Streams]
+]:
+    """Wrap a TCP connection opener to refuse hosts resolving to an address that reaches this host's loopback."""
+
+    async def open_outward_connection(
+        host: str, port: int, /, *args: P.args, **kwargs: P.kwargs
+    ) -> Streams:
+        """Resolve host once, and unless an address reaches loopback, connect to the first address accepting."""
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        )
+        addresses: list[str] = []
+        for *_, (address, _port, *ipv6_fields) in infos:
+            assert isinstance(address, str)
+            # keep the scope id of a link-local IPv6 address, as its zone suffix
+            zone = f"%{ipv6_fields[-1]}" if ipv6_fields and ipv6_fields[-1] else ""
+            addresses.append(f"{address}{zone}")
+        if any(map(reaches_loopback, addresses)):
+            raise PermissionError(
+                f"Refused connection to {host}, which resolves to this host's loopback"
+            )
+        errors: list[OSError] = []
+        for address in addresses:
+            try:
+                return await open_connection(address, port, *args, **kwargs)
+            except OSError as error:
+                errors.append(error)
+        raise OSError("; ".join(map(str, errors)))
+
+    return open_outward_connection
+
+
 def with_dead_peer_detection[**P](
     open_connection: collections.abc.Callable[P, collections.abc.Awaitable[Streams]],
 ) -> collections.abc.Callable[P, collections.abc.Awaitable[Streams]]:
@@ -67,10 +111,10 @@ def with_dead_peer_detection[**P](
 
 
 def load(_loader: addonmanager.Loader) -> None:
-    """Make the upstream connections mitmproxy opens detect a silently dead peer (mitmproxy hook)."""
+    """Make the upstream connections mitmproxy opens avoid this host's loopback and detect a silently dead peer (mitmproxy hook)."""
     # ty types a module's function attribute as that very function, which no wrapper can match
     asyncio.open_connection = with_dead_peer_detection(  # ty: ignore[invalid-assignment]
-        asyncio.streams.open_connection
+        with_loopback_refusal(asyncio.streams.open_connection)
     )
 
 

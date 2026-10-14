@@ -32,7 +32,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 
 ### Features
 
-- Supported agents: Amp, Claude Code, Codex CLI, hax, Pi
+- Supported agents: [Amp](https://ampcode.com/), [Claude Code](https://claude.com/product/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [hax](https://usehax.dev/), [Pi](https://pi.dev/)
 - Startup overhead <80ms
 - Unshares **all** namespaces: the agent can not access processes, devices, users, etc. outside of its sandbox
 - Builds filesystem namespace tailored for the agent:
@@ -60,12 +60,12 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 - Gives the agent its own network through [pasta](https://passt.top/):
   - outgoing connections are allowed, except to the host's loopback, where only DNS and [`agent-proxy`](#agent-proxy) are reachable
   - incoming connections from the host's loopback are allowed to the ports the agent listens on
-- Optionally routes HTTPS traffic through [`agent-proxy`](#agent-proxy), so `gh` reaches the GitHub API inside the sandbox without ever exposing the token to the agent
+- Optionally routes HTTPS traffic through [`agent-proxy`](#agent-proxy), so [`gh`](https://github.com/cli/cli) reaches the GitHub API inside the sandbox without ever exposing the token to the agent
 
 ### Requirements
 
 - [Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
-- [passt](https://passt.top/) (`pasta`)
+- passt (`pasta`)
 - Python 3.13+
 
 ### Usage
@@ -88,7 +88,7 @@ Replace `/usr/bin/claude` by the location of the main Claude Code binary. Use `~
 
 ## `agent-proxy`
 
-An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets `gh` reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher sets `HTTPS_PROXY` for the whole sandbox, so the traffic of every HTTPS client that honors it goes through the proxy: requests to `api.github.com` are intercepted, other hosts are tunneled untouched.
+An optional host-side [mitmproxy](https://mitmproxy.org/) user service lets [`gh`](https://github.com/cli/cli) reach the GitHub API from inside the sandbox without the sandbox ever seeing the token: `gh` is given a placeholder token and routed through the proxy, which swaps in the real token (from an encrypted systemd credential) only for `api.github.com`. When the service is running the launcher sets `HTTPS_PROXY` for the whole sandbox, so the traffic of every HTTPS client that honors it goes through the proxy: requests to `api.github.com` are intercepted, other hosts are tunneled untouched.
 The proxy also enables TCP keepalive and a timeout for unacknowledged data on its upstream connections, so a client whose connection's network path silently died, typically across a laptop suspend, gets an error instead of hanging.
 The proxy is no way around the sandbox's network isolation: it refuses to connect to the host's loopback, whatever the spelling of the address (`localhost`, `0.0.0.0`, `[::ffff:127.0.0.1]`, etc.).
 
@@ -119,7 +119,7 @@ systemctl --user enable --now agent-proxy.service
 - Persistent exchange directory shared at `/run/agent-microvm-exchange` in the guest, for artifacts that don't belong in the source tree
 - The distribution is transparently rebuilt if needed, to always have up to date packages
 - Supported host distributions: Arch Linux, Debian
-- Uses common tools: `qemu` for virtualization and `passt` for networking
+- Uses common tools: [`qemu`](https://www.qemu.org/) for virtualization and [`passt`](https://passt.top/) for networking
 - Startup overhead <3s hot, ~20s cold (first time only)
 
 ### Requirements

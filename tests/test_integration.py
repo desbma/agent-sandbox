@@ -287,12 +287,13 @@ class SandboxTestCase(unittest.TestCase):
         extra_env: dict[str, str] | None = None,
         cwd: Path | None = None,
     ) -> dict[str, object]:
-        """Run the launcher and return the probe's JSON report."""
+        """Run the launcher, check it wrote nothing to stderr, and return the probe's JSON report."""
         result = self.run_launcher(ops, agent=agent, extra_env=extra_env, cwd=cwd)
         if result.returncode != 0:
             raise RuntimeError(
                 f"Launcher failed ({result.returncode}): {result.stderr}"
             )
+        self.assertEqual(result.stderr, "")
         report = json.loads(result.stdout)
         assert isinstance(report, dict)
         return report

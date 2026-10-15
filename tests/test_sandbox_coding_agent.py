@@ -1231,7 +1231,7 @@ class NetworkTests(unittest.TestCase):
         """Cut the sandbox off from host loopback but its DNS port, and forward sandbox servers back to it."""
         expected = (
             "pasta --config-net --quiet -t 127.0.0.1/auto --host-lo-to-ns-lo "
-            "-u none -T 53 -U 53 --no-map-gw"
+            "-u none -T 53 -U 53 --no-map-gw --dns none"
         )
         self.assertEqual(launcher.PASTA_ARGS, expected.split())
 

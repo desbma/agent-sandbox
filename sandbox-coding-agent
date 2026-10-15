@@ -1138,6 +1138,9 @@ PASTA_ARGS = [
     "-U",
     "53",
     "--no-map-gw",
+    # the sandbox reads its nameservers from the host's /etc/resolv.conf, not from pasta
+    "--dns",
+    "none",
 ]
 
 BWRAP_BASE_ARGS = [

@@ -14,6 +14,7 @@ from test_integration import SCRIPT_PATH, SandboxTestCase
 PERFORMANCE_ENV_VAR = "SANDBOX_CODING_AGENT_PERFORMANCE"
 PERFORMANCE_ENABLED = os.environ.get(PERFORMANCE_ENV_VAR) is not None
 SKIP_REASON = f"Set {PERFORMANCE_ENV_VAR} to time real sandbox launches"
+# hyperfine from the test runner's PATH, absent from the synthetic environment's
 HYPERFINE_BIN = shutil.which("hyperfine")
 WARMUP_RUNS = 3
 MAX_MEDIAN_LAUNCH_OVERHEAD_SECONDS = 0.2
@@ -31,15 +32,13 @@ class LaunchOverheadTests(SandboxTestCase):
     def assert_launch_overhead(self, agent: Path) -> None:
         """Time agent run through the launcher and directly, report both medians, and bound their difference."""
         assert HYPERFINE_BIN is not None
-        export = self.fixture.root / "hyperfine.json"
-
         result = subprocess.run(
             [
                 HYPERFINE_BIN,
                 "--warmup",
                 str(WARMUP_RUNS),
-                "--export-json",
-                str(export),
+                "--style=none",
+                "--export-json=-",
                 shlex.join([sys.executable, str(SCRIPT_PATH), str(agent)]),
                 shlex.quote(str(agent)),
             ],
@@ -57,7 +56,7 @@ class LaunchOverheadTests(SandboxTestCase):
 
         launch_median, direct_median = (
             run["summary"]["time_wall_clock"]["median"]
-            for run in json.loads(export.read_text())["results"]
+            for run in json.loads(result.stdout)["results"]
         )
         print(
             f"Median wall time of {agent.name}: {launch_median * 1000:.1f} ms through the launcher, {direct_median * 1000:.1f} ms directly",

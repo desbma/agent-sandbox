@@ -65,11 +65,12 @@ SANDBOX_CODING_AGENT_PERFORMANCE=1 python3 -m unittest discover -s tests -p test
 AGENT_PROXY_INTEGRATION=1 python3 -m unittest discover -s tests -p test_agent_proxy.py
 ```
 
-`agent-microvm` adds a unit suite that must also pass without `sudo`, and an opt-in VM-booting integration suite that needs outbound network. From `agent-microvm/`:
+`agent-microvm` adds a unit suite that must also pass without `sudo`, an opt-in VM-booting integration suite that needs outbound network, and an opt-in performance test that uses `hyperfine` 2 or later to time a whole session running `true` on a warm artifact cache, prints its median, and bounds it. From `agent-microvm/`:
 
 ```sh
 python3 -m unittest discover -s tests
 AGENT_MICROVM_INTEGRATION=1 python3 -m unittest tests.test_integration
+AGENT_MICROVM_PERFORMANCE=1 python3 -m unittest tests.test_performance
 ```
 
 To exercise a change end to end, boot a real VM with a command, e.g. `./agent-microvm uname -a`; the first run downloads Alpine artifacts and builds the rootfs.

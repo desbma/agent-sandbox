@@ -40,7 +40,7 @@ jobs:
 
   integration-tests:
     runs-on: ubuntu-latest
-    env:
+    env: &nix-env
       NIXPKGS: "github:NixOS/nixpkgs/nixpkgs-unstable"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: "3.13"
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - run: |
+      - run: &sandbox-prerequisites |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
@@ -56,19 +56,35 @@ jobs:
           bwrap=$(nix build --no-link --print-out-paths "$NIXPKGS#bubblewrap")/bin/bwrap
           pasta=$(nix build --no-link --print-out-paths "$NIXPKGS#passt")/bin/pasta
           jj=$(nix build --no-link --print-out-paths "$NIXPKGS#jujutsu")/bin/jj
-          mitmdump=$(nix build --no-link --print-out-paths "$NIXPKGS#mitmproxy")/bin/mitmdump
           sudo ln -sf "$bwrap" /usr/bin/bwrap
           sudo ln -sf "$pasta" /usr/bin/pasta
           sudo ln -sf "$jj" /usr/bin/jj
+      - run: |
+          mitmdump=$(nix build --no-link --print-out-paths "$NIXPKGS#mitmproxy")/bin/mitmdump
           sudo ln -sf "$mitmdump" /usr/bin/mitmdump
       - run: python3 -m unittest discover -s tests -v
         env:
           SANDBOX_CODING_AGENT_INTEGRATION: "1"
           AGENT_PROXY_INTEGRATION: "1"
-      - run: nix shell "$NIXPKGS#hyperfine" --command python3 -m unittest discover -s tests -p test_performance.py -v
-        env:
-          SANDBOX_CODING_AGENT_PERFORMANCE: "1"
       - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" --command python3 -m unittest tests.test_integration -v
         working-directory: agent-microvm
         env:
           AGENT_MICROVM_INTEGRATION: "1"
+
+  performance-tests:
+    runs-on: ubuntu-latest
+    env: *nix-env
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - run: *sandbox-prerequisites
+      - run: nix shell "$NIXPKGS#hyperfine" --command python3 -m unittest discover -s tests -p test_performance.py -v
+        env:
+          SANDBOX_CODING_AGENT_PERFORMANCE: "1"
+      - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" "$NIXPKGS#hyperfine" --command python3 -m unittest tests.test_performance -v
+        working-directory: agent-microvm
+        env:
+          AGENT_MICROVM_PERFORMANCE: "1"

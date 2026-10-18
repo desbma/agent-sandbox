@@ -52,6 +52,12 @@ FORWARDABLE_PORTS = range(20000, 30000)
 POLL_SECONDS = 0.1
 
 
+def setUpModule() -> None:
+    """Skip the module's tests unless integration tests are enabled."""
+    if not INTEGRATION_ENABLED:
+        raise unittest.SkipTest(SKIP_REASON)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class SandboxFixture:
     """Synthetic host directory tree backing one launcher run."""
@@ -185,7 +191,6 @@ def read_greeting(
     raise RuntimeError(f"Nothing listened on 127.0.0.1:{port} while the probe ran")
 
 
-@unittest.skipUnless(INTEGRATION_ENABLED, SKIP_REASON)
 class SandboxTestCase(unittest.TestCase):
     """Test case driving real launcher runs against synthetic host environments."""
 

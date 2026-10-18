@@ -65,6 +65,9 @@ jobs:
         env:
           SANDBOX_CODING_AGENT_INTEGRATION: "1"
           AGENT_PROXY_INTEGRATION: "1"
+      - run: nix shell "$NIXPKGS#hyperfine" --command python3 -m unittest discover -s tests -p test_performance.py -v
+        env:
+          SANDBOX_CODING_AGENT_PERFORMANCE: "1"
       - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" --command python3 -m unittest tests.test_integration -v
         working-directory: agent-microvm
         env:

@@ -53,6 +53,12 @@ python3 -m unittest discover -s tests
 agent-microvm/agent-microvm bash workspace/tests/microvm-integration.sh
 ```
 
+An opt-in performance test, on the same synthetic trees, uses [hyperfine](https://github.com/sharkdp/hyperfine) to time a stub `claude` agent and `true`, run directly and through the launcher, prints both medians, and bounds the wall time the launcher adds. It needs `hyperfine` 2 or later and `jj` on top of what the integration suite needs, so it does not run inside the agent sandbox either. From the repository root:
+
+```sh
+SANDBOX_CODING_AGENT_PERFORMANCE=1 python3 -m unittest discover -s tests -p test_performance.py
+```
+
 `agent-proxy` is covered by the same directory: unit tests of its upstream connection opener, and an opt-in integration suite that runs the real proxy in a private user and network namespace and checks that it refuses tunnels to loopback, and that a silent tunnel stays open while its upstream lives but closes once netem silently drops its upstream packets (needs `mitmdump`, iproute2, the kernel's netem qdisc and unprivileged user namespaces; takes about three and a half minutes). From the repository root:
 
 ```sh

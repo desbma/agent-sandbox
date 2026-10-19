@@ -42,7 +42,6 @@ JJ_BIN = shutil.which(
     path=os.pathsep.join(entry for entry in os.get_exec_path() if entry != "/run/bin"),
 )
 SYS_CPU_ONLINE = Path("/sys/devices/system/cpu/online")
-HAX_BIN = Path("/usr/bin/hax")
 # sandbox path of the host hax state dir under an auth profile
 HAX_PROFILE_STATE_DIR = Path("/run/sandbox-coding-agent/hax-state")
 # the port the launcher forwards to agent-proxy (its PROXY_PORT constant)
@@ -1477,9 +1476,26 @@ class AgentSpecificTests(SandboxTestCase):
             sorted(p.name for p in state_dir.iterdir()), ["auth-pro.json", "sessions"]
         )
 
-    @unittest.skipUnless(os.access(HAX_BIN, os.X_OK), "hax is not installed")
+    @unittest.skipIf(os.access("/usr/bin/hax", os.X_OK), "System hax takes precedence")
+    def test_hax_extra_agent_stays_executable(self) -> None:
+        """Expose the hax binary and wrapper executable beside the launched agent."""
+        binary = self.make_executable(self.fixture.home / ".local/libexec/hax")
+        wrapper = self.make_executable(self.fixture.home / ".local/bin/hax")
+
+        report = self.run_probe(
+            [
+                Op("binary_executable", OpKind.ACCESS_X, binary),
+                Op("wrapper_executable", OpKind.ACCESS_X, wrapper),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(report["binary_executable"], True)
+        self.assertEqual(report["wrapper_executable"], True)
+
     def test_hax_auth_profile_applies_to_extra_agent(self) -> None:
         """Link the profile credentials of hax provisioned beside the launched agent."""
+        self.make_executable(self.fixture.home / ".local/libexec/hax")
         report = self.run_probe(
             [
                 Op(

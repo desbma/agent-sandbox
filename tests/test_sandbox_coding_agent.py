@@ -364,7 +364,7 @@ class AgentSpecsTests(unittest.TestCase):
                 "amp": (),
                 "claude": (),
                 "codex": (),
-                "hax": (Path("/usr/bin/hax"),),
+                "hax": (Path("/usr/bin/hax"), FAKE_HOME / ".local/libexec/hax"),
                 "pi": (Path("/usr/bin/pi"), FAKE_HOME / ".local/libexec/pi/pi"),
             },
         )

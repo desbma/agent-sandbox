@@ -1039,7 +1039,7 @@ AGENTS: dict[str, AgentSpec] = {
                 HOME / ".config/hax/skills",
             ),
         ),
-        provision_always=(Path("/usr/bin/hax"),),
+        provision_always=(Path("/usr/bin/hax"), HOME / ".local/libexec/hax"),
     ),
     "pi": AgentSpec(
         agents_md=HOME / ".pi/agent/AGENTS.md",

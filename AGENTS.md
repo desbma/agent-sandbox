@@ -59,7 +59,7 @@ An opt-in performance test, on the same synthetic trees, uses [hyperfine](https:
 SANDBOX_CODING_AGENT_PERFORMANCE=1 python3 -m unittest discover -s tests -p test_performance.py
 ```
 
-`agent-proxy` is covered by the same directory: unit tests of its upstream connection opener, and an opt-in integration suite that runs the real proxy in a private user and network namespace and checks that it refuses tunnels to loopback, and that a silent tunnel stays open while its upstream lives but closes once netem silently drops its upstream packets (needs `mitmdump`, iproute2, the kernel's netem qdisc and unprivileged user namespaces; takes about three and a half minutes). From the repository root:
+`agent-proxy` is covered by the same directory: unit tests of its upstream connection opener, and an opt-in integration suite that runs the real proxy in private user, mount and network namespaces, against local upstreams standing in for remote servers and for `api.github.com`. It checks how the proxy answers tunnel requests, the token injection and body streaming of intercepted GitHub API requests, and that a silent tunnel stays open while its upstream lives but closes once netem silently drops its upstream packets (needs `mitmdump`, `openssl`, iproute2, the kernel's netem qdisc and unprivileged user namespaces; takes about three and a half minutes). From the repository root:
 
 ```sh
 AGENT_PROXY_INTEGRATION=1 python3 -m unittest discover -s tests -p test_agent_proxy.py

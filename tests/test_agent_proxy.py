@@ -155,11 +155,11 @@ class UpstreamConnectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 def run_probe(scenario: Scenario) -> None:
-    """Run a scenario of the agent-proxy probe in a private user and network namespace and raise if it fails."""
+    """Run a scenario of the agent-proxy probe in private user, mount and network namespaces and raise if it fails."""
     result = subprocess.run(
         [
             "unshare",
-            "-rn",
+            "-rnm",
             sys.executable,
             str(PROBE_PATH),
             str(AGENT_PROXY_PATH),
@@ -181,8 +181,16 @@ class TunnelTests(unittest.TestCase):
     """Tests of tunnels through a real proxy."""
 
     def test_tunnels_to_loopback_refused(self) -> None:
-        """Close tunnels to any spelling of loopback without reaching it, while opening others."""
+        """Answer 502 to tunnels to any spelling of loopback without reaching it, while opening others."""
         run_probe(Scenario.LOOPBACK_REFUSAL)
+
+    def test_server_greeting_relayed(self) -> None:
+        """Relay a greeting the upstream sends before the client sends anything."""
+        run_probe(Scenario.SERVER_GREETING)
+
+    def test_github_api_request_intercepted(self) -> None:
+        """Send a GitHub API request upstream with the token, streaming its body there and its response back."""
+        run_probe(Scenario.INTERCEPTION)
 
     def test_healthy_tunnel_kept_open(self) -> None:
         """Keep a silent tunnel open while its upstream path stays alive."""

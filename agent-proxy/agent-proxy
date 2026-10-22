@@ -31,6 +31,8 @@ CA_CERT = DATA_DIR / "mitmproxy-ca-cert.pem"
 KEEPALIVE_IDLE_SECONDS = 30
 KEEPALIVE_INTERVAL_SECONDS = 10
 UNACKNOWLEDGED_TIMEOUT_SECONDS = 60
+# inactivity after which the proxy closes a client connection
+IDLE_TIMEOUT_SECONDS = 24 * 60 * 60
 
 type Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 
@@ -124,11 +126,18 @@ def running() -> None:
     bundle.write_bytes(SYSTEM_CA_BUNDLE.read_bytes() + b"\n" + CA_CERT.read_bytes())
 
 
-def request(flow: http.HTTPFlow) -> None:
-    """Inject the token on requests whose upstream is the GitHub API (mitmproxy hook)."""
+def requestheaders(flow: http.HTTPFlow) -> None:
+    """Inject the token on requests whose upstream is the GitHub API, and stream their body (mitmproxy hook)."""
+    flow.request.stream = True
     address = flow.server_conn.address
     if address is not None and address[0] == GITHUB_API_HOST:
         flow.request.headers["authorization"] = f"Bearer {github_token()}"
+
+
+def responseheaders(flow: http.HTTPFlow) -> None:
+    """Stream response bodies to the client as they arrive (mitmproxy hook)."""
+    assert flow.response is not None
+    flow.response.stream = True
 
 
 def main() -> None:
@@ -145,7 +154,7 @@ def main() -> None:
             "--set",
             f"confdir={DATA_DIR}",
             "--set",
-            "connection_strategy=lazy",
+            f"tcp_timeout={IDLE_TIMEOUT_SECONDS}",
             "--allow-hosts",
             ALLOW_HOSTS,
             "-s",

@@ -1083,6 +1083,7 @@ ENV_SET = {
         ),
     ),
     "PS1": f"{AGENT}-sandbox$ ",
+    # silence uv's warning on falling back to copies: hardlinks from its cache to venvs fail across mounts (EXDEV)
     "UV_LINK_MODE": "copy",
 }
 ENV_FORWARD = [

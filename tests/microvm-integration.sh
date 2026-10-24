@@ -16,6 +16,9 @@ apk add -q debootstrap dnsmasq perl
 # the launcher expects a merged-/usr host, which Alpine is not; Debian sid ships a recent enough pasta
 debootstrap --variant=minbase --include=bubblewrap,ca-certificates,git,iproute2,passt,python3 \
     sid /debian http://deb.debian.org/debian >/dev/null
+# a pacman database stub, for the launcher's pacman support
+mkdir -p /debian/var/lib/pacman/local /debian/var/lib/pacman/sync
+touch /debian/var/lib/pacman/sync/core.db /debian/var/lib/pacman/sync/core.files
 chroot /debian /usr/sbin/useradd --uid "$(id -u user)" --create-home user
 # the Debian root resolves names through host loopback, as with systemd-resolved
 dnsmasq --listen-address=127.0.0.53 --bind-interfaces

@@ -694,6 +694,17 @@ def gen_cpu_topology() -> bytes | None:
     return f"{counts}\npin={pin_line}".encode()
 
 
+def gen_pacman_conf() -> bytes | None:
+    """Generate a pacman.conf declaring the host's sync databases without servers, or None without a pacman database."""
+    if not PACMAN_DB_DIR.is_dir():
+        return None
+    sections = "".join(
+        f"[{db.stem}]\n" for db in sorted((PACMAN_DB_DIR / "sync").glob("*.db"))
+    )
+    # no signature is checkable: the host keyring is not mounted
+    return f"[options]\nSigLevel = Never\n{sections}".encode()
+
+
 def read_instructions(path: Path) -> str | None:
     """Return the stripped content of a user instructions file, or None if it does not exist."""
     try:
@@ -842,6 +853,9 @@ LAUNCHER_COPY_PATH = LAUNCHER_RUN_DIR / "launcher"
 SYS_CPU_DIR = Path("/sys/devices/system/cpu")
 CPU_TOPOLOGY_PATH = LAUNCHER_RUN_DIR / "cpu-topology"
 
+# host pacman package database
+PACMAN_DB_DIR = Path("/var/lib/pacman")
+
 # static mounts in sandbox
 MOUNTS: list[Mount] = [
     # tmpfs
@@ -853,6 +867,7 @@ MOUNTS: list[Mount] = [
     # read-only binds
     Mount(Path("/opt/intel"), MountKind.BIND_RO),
     Mount(Path("/usr"), MountKind.BIND_RO),
+    Mount(PACMAN_DB_DIR, MountKind.BIND_RO),
     Mount(Path("/var/lib/dpkg"), MountKind.BIND_RO),
     Mount(Path("/var/lib/ghc"), MountKind.BIND_RO),
     # system config
@@ -1233,6 +1248,9 @@ if __name__ == "__main__":
     cpu_topology = gen_cpu_topology()
     if cpu_topology is not None:
         files[CPU_TOPOLOGY_PATH] = File(cpu_topology)
+    pacman_conf = gen_pacman_conf()
+    if pacman_conf is not None:
+        files[Path("/etc/pacman.conf")] = File(pacman_conf)
     sandbox_facts = SandboxFacts(
         exchange_dir=exchange_dir,
         review_dir=review_dir,

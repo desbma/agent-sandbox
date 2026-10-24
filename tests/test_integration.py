@@ -42,6 +42,7 @@ JJ_BIN = shutil.which(
     path=os.pathsep.join(entry for entry in os.get_exec_path() if entry != "/run/bin"),
 )
 SYS_CPU_ONLINE = Path("/sys/devices/system/cpu/online")
+PACMAN_DB_DIR = Path("/var/lib/pacman")
 # sandbox path of the host hax state dir under an auth profile
 HAX_PROFILE_STATE_DIR = Path("/run/sandbox-coding-agent/hax-state")
 # the port the launcher forwards to agent-proxy (its PROXY_PORT constant)
@@ -578,6 +579,22 @@ class GeneratedFileTests(SandboxTestCase):
         self.assertEqual(
             report["nsswitch"], "passwd: files\ngroup: files\nhosts: files dns\n"
         )
+
+    @unittest.skipUnless(PACMAN_DB_DIR.is_dir(), "Host has no pacman database")
+    def test_etc_pacman_conf(self) -> None:
+        """Generate a pacman.conf over the read-only host package database."""
+        report = self.run_probe(
+            [
+                Op("conf", OpKind.READ, "/etc/pacman.conf"),
+                Op("local", OpKind.ISDIR, PACMAN_DB_DIR / "local"),
+                Op("write", OpKind.WRITE, PACMAN_DB_DIR / "sync/itest-canary"),
+            ],
+            agent="claude",
+        )
+
+        self.assertTrue(self.report_str(report, "conf"))
+        self.assertEqual(report["local"], True)
+        self.assertEqual(report["write"], "EROFS")
 
     @unittest.skipUnless(JJ_BIN is not None, "jj is not installed")
     def test_jj_wrapper(self) -> None:

@@ -1669,6 +1669,31 @@ class GenCpuTopologyTests(TempDirTestCase):
             self.assertIsNone(launcher.gen_cpu_topology())
 
 
+class GenPacmanConfTests(TempDirTestCase):
+    """Tests of pacman configuration generation from the host package database."""
+
+    def conf_for(self, db_dir: Path) -> bytes | None:
+        """Run gen_pacman_conf against a fake pacman database directory."""
+        with unittest.mock.patch.object(launcher, "PACMAN_DB_DIR", db_dir):
+            return launcher.gen_pacman_conf()
+
+    def test_declares_each_sync_database(self) -> None:
+        """Declare one server-less section per sync database, ignoring other files."""
+        db_dir = self.make_temp_dir()
+        sync_dir = db_dir / "sync"
+        sync_dir.mkdir()
+        for name in ("extra.db", "core.db", "core.db.sig", "core.files"):
+            (sync_dir / name).touch()
+
+        self.assertEqual(
+            self.conf_for(db_dir), b"[options]\nSigLevel = Never\n[core]\n[extra]\n"
+        )
+
+    def test_returns_none_without_database(self) -> None:
+        """Generate no configuration when the host has no pacman database."""
+        self.assertIsNone(self.conf_for(self.make_temp_dir() / "pacman"))
+
+
 class PromptBoolTests(unittest.TestCase):
     """Tests of interactive boolean prompting."""
 

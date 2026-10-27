@@ -1,0 +1,827 @@
+#!/usr/bin/env python3
+
+"""Start a coding-agent harness non-interactively, with a restricted set of tools, skills and instructions."""
+
+import argparse
+import ctypes
+import dataclasses
+import enum
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import textwrap
+import uuid
+from collections.abc import Collection, Iterable, Sequence
+from pathlib import Path
+from typing import IO, NoReturn, Self
+
+
+class Harness(enum.StrEnum):
+    """Coding-agent harness."""
+
+    CLAUDE = enum.auto()
+    PI = enum.auto()
+    HAX = enum.auto()
+
+
+EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+CLAUDE_ALIASES = frozenset({"fable", "haiku", "opus", "sonnet"})
+DEFAULT_PRESET = "full"
+RESTRICTED_PRESET_ARGS = ("--no-skills", "--no-memory", "--no-git-context", "--no-mcp")
+PRESETS = {
+    "full": ("--no-mcp",),
+    "lean": ("--tools", "shell", *RESTRICTED_PRESET_ARGS),
+    "read-only": ("--tools", "read,grep,find", *RESTRICTED_PRESET_ARGS),
+    "bare": (
+        "--no-tools",
+        "--no-instruction-files",
+        "--no-system-prompt",
+        *RESTRICTED_PRESET_ARGS,
+    ),
+}
+# tool names, and the names of the harnesses taking a tool list, for those having the tool
+TOOLS = {
+    "shell": {Harness.CLAUDE: ("Bash",), Harness.PI: ("bash",)},
+    "read": {Harness.CLAUDE: ("Read",), Harness.PI: ("read",)},
+    "write": {Harness.CLAUDE: ("Write",), Harness.PI: ("write",)},
+    "edit": {Harness.CLAUDE: ("Edit",), Harness.PI: ("edit",)},
+    "grep": {Harness.CLAUDE: ("Grep",), Harness.PI: ("grep",)},
+    "find": {Harness.CLAUDE: ("Glob",), Harness.PI: ("find", "ls")},
+    "web": {
+        Harness.CLAUDE: ("WebFetch", "WebSearch"),
+        Harness.PI: (
+            "web_search",
+            "fetch_content",
+            "get_search_content",
+            "source_check",
+        ),
+    },
+    "subagent": {Harness.CLAUDE: ("Agent",)},
+}
+SHELL_COVERED_TOOLS = frozenset({"find", "grep", "read", "write"})
+# tools claude enables when given no tool list, Skill aside
+CLAUDE_OWN_TOOLS = (
+    "Agent",
+    "Bash",
+    "Edit",
+    "ListAgents",
+    "Read",
+    "ReportFindings",
+    "ScheduleWakeup",
+    "ToolSearch",
+    "Workflow",
+    "Write",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "DesignSync",
+    "EnterWorktree",
+    "ExitWorktree",
+    "NotebookEdit",
+    "RemoteTrigger",
+    "SendMessage",
+    "TaskStop",
+    "WebFetch",
+    "WebSearch",
+)
+# built-in claude skills that disableBundledSkills leaves on
+CLAUDE_UNBUNDLED_SKILLS = frozenset({"plugin-authoring"})
+HAX_FIXED_TOOLS = frozenset({"shell", "read", "write", "edit"})
+HAX_OWN_TOOLS = HAX_FIXED_TOOLS | {"subagent"}
+# hax variables a launch can set, never inherited
+HAX_LAUNCH_VARIABLES = frozenset(
+    {
+        "HAX_MAX_TURNS",
+        "HAX_NO_AGENTS_MD",
+        "HAX_NO_SKILLS",
+        "HAX_NO_SUBAGENTS",
+        "HAX_NO_TASKS",
+        "HAX_SYSTEM_PROMPT",
+        "HAX_SYSTEM_PROMPT_APPEND",
+    }
+)
+PI_PLACEHOLDER_SYSTEM_PROMPT = "You are a helpful assistant."
+# pi package providing the web tools
+PI_WEB_PACKAGE = "npm:pi-web-access"
+# help of each on/off option pair, the option first
+BOOLEAN_OPTIONS = {
+    "instruction-files": (
+        "Load instruction files such as AGENTS.md",
+        "Load no instruction file",
+    ),
+    "memory": (
+        "Enable claude's system prompt addition about auto memory",
+        "Disable claude's system prompt addition about auto memory",
+    ),
+    "git-context": (
+        "Enable claude's system prompt additions for git",
+        "Disable claude's system prompt additions for git",
+    ),
+    "mcp": ("Enable the configured MCP servers", "Disable the configured MCP servers"),
+}
+# directory present only inside a sandbox-coding-agent sandbox
+SANDBOX_DIR = Path("/run/sandbox-coding-agent")
+FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+PR_SET_PDEATHSIG = 1
+
+
+class UnsatisfiableError(Exception):
+    """Constraint of a request that a harness cannot satisfy."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Selection:
+    """Set of tool or skill names: an explicit one, or the harness's own adjusted by additions and removals."""
+
+    names: frozenset[str] | None
+    added: frozenset[str] = frozenset()
+    removed: frozenset[str] = frozenset()
+
+    def adjust(self, added: frozenset[str], removed: frozenset[str]) -> Self:
+        """Add and remove names, removals winning."""
+        if self.names is not None:
+            return dataclasses.replace(self, names=(self.names | added) - removed)
+        return dataclasses.replace(
+            self,
+            added=(self.added | added) - removed,
+            removed=(self.removed - added) | removed,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class Request:
+    """Harness-independent launch of a task."""
+
+    model: str
+    effort: str | None
+    harness: Harness | None
+    tools: Selection
+    skills: Selection
+    invoked_skill: str | None
+    instruction_files: bool
+    memory: bool
+    git_context: bool
+    mcp: bool
+    system_prompt: str | None
+    appended_system_prompt: str | None
+    max_turns: int | None
+    session_id: uuid.UUID | None
+    session: bool
+    events: bool
+    auth: str | None
+    prompt: list[str]
+
+
+@dataclasses.dataclass
+class Launch:
+    """Harness command line, the environment variables it adds, and the prompt fed on its stdin."""
+
+    argv: list[str]
+    env: dict[str, str]
+    stdin: str
+
+
+class SelectionAction(argparse.Action):
+    """Argparse action setting a selection from a list of names, or adjusting it by +NAME and -NAME items."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        """Apply the option's value to the selection."""
+        assert isinstance(values, str)
+        items = values.split(",")
+        if not all(item.lstrip("+-") for item in items):
+            parser.error(f"Empty name in {option_string} {values}")
+        if all(item[0] not in "+-" for item in items):
+            selection = Selection(frozenset(items))
+        elif all(item[0] in "+-" for item in items):
+            selection = getattr(namespace, self.dest).adjust(
+                frozenset(item[1:] for item in items if item[0] == "+"),
+                frozenset(item[1:] for item in items if item[0] == "-"),
+            )
+        else:
+            parser.error(
+                f"{option_string} takes names or +/- adjustments, not both: {values}"
+            )
+        setattr(namespace, self.dest, selection)
+
+
+class HelpFormatter(argparse.HelpFormatter):
+    """Help formatter keeping the line breaks of an option's help, the lines of a multi-line one wrapped with a hanging indent."""
+
+    def _split_lines(self, text: str, width: int) -> list[str]:
+        """Wrap each line of an option's help."""
+        lines = text.splitlines()
+        indent = "  " if len(lines) > 1 else ""
+        return [
+            wrapped
+            for line in lines
+            for wrapped in textwrap.wrap(
+                line, width, subsequent_indent=indent, break_on_hyphens=False
+            )
+        ]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command line parser."""
+    parser = argparse.ArgumentParser(
+        description="Start a coding-agent harness non-interactively.",
+        formatter_class=HelpFormatter,
+    )
+    parser.add_argument("--model", required=True, help="Claude or GPT model")
+    parser.add_argument(
+        "--effort",
+        choices=EFFORTS,
+        help="Reasoning effort, raised to the nearest level the harness supports",
+    )
+    parser.add_argument(
+        "--preset",
+        choices=PRESETS,
+        default=DEFAULT_PRESET,
+        help="\n".join(
+            [
+                "Arguments to start from, placed before the others:",
+                *(
+                    f"{name}{' (default)' if name == DEFAULT_PRESET else ''}: {' '.join(args)}"
+                    for name, args in PRESETS.items()
+                ),
+            ]
+        ),
+    )
+    parser.add_argument(
+        "--harness",
+        type=Harness,
+        choices=list(Harness),
+        help="Harness to run, instead of the first one able to satisfy the request",
+    )
+    parser.add_argument(
+        "--tools",
+        action=SelectionAction,
+        default=Selection(None),
+        metavar=f"[+|-]{{{','.join(TOOLS)}}},...",
+        help="Tools, or adjustments to the preset's",
+    )
+    parser.add_argument(
+        "--no-tools",
+        dest="tools",
+        action="store_const",
+        const=Selection(frozenset()),
+        help="Enable no tool",
+    )
+    parser.add_argument(
+        "--skills",
+        action=SelectionAction,
+        default=Selection(None),
+        metavar="[+|-]NAME,...",
+        help="Skills, or adjustments to the preset's",
+    )
+    parser.add_argument(
+        "--no-skills",
+        dest="skills",
+        action="store_const",
+        const=Selection(frozenset()),
+        help="Load no skill",
+    )
+    parser.add_argument(
+        "--invoke-skill",
+        dest="invoked_skill",
+        metavar="NAME",
+        help="Skill to invoke, the prompt becoming its arguments",
+    )
+    for name, (on_help, off_help) in BOOLEAN_OPTIONS.items():
+        dest = name.replace("-", "_")
+        parser.add_argument(
+            f"--{name}", dest=dest, action="store_true", default=True, help=on_help
+        )
+        parser.add_argument(
+            f"--no-{name}", dest=dest, action="store_false", help=off_help
+        )
+    parser.add_argument(
+        "--system-prompt",
+        metavar="TEXT|@FILE",
+        help="Replacement for the default system prompt",
+    )
+    parser.add_argument(
+        "--no-system-prompt",
+        dest="system_prompt",
+        action="store_const",
+        const="",
+        help="Remove the system prompt, or replace it with a short placeholder for pi",
+    )
+    parser.add_argument(
+        "--append-system-prompt",
+        dest="appended_system_prompt",
+        metavar="TEXT|@FILE",
+        help="Text appended to the system prompt",
+    )
+    parser.add_argument("--max-turns", type=int, metavar="N", help="Turn cap")
+    session = parser.add_mutually_exclusive_group()
+    session.add_argument(
+        "--session-id",
+        type=uuid.UUID,
+        metavar="UUID",
+        help="Id of the session the harness records",
+    )
+    session.add_argument(
+        "--no-session",
+        dest="session",
+        action="store_false",
+        help="Record no session",
+    )
+    parser.add_argument(
+        "--json",
+        dest="events",
+        action="store_true",
+        help="Print the harness's JSON event stream instead of the final answer",
+    )
+    parser.add_argument(
+        "--auth", metavar="PROFILE", help="Sandbox auth profile of the harness"
+    )
+    parser.add_argument("prompt", nargs="*", help="Prompt, read from stdin when absent")
+    return parser
+
+
+def attach_selection_values(argv: Sequence[str]) -> list[str]:
+    """Join each --tools and --skills option with the value after it, as --option=value, unless that value is another long option."""
+    args = list(argv)
+    end = args.index("--") if "--" in args else len(args)
+    for index in reversed(range(end - 1)):
+        option, value = args[index : index + 2]
+        if option in ("--skills", "--tools") and not value.startswith("--"):
+            args[index : index + 2] = [f"{option}={value}"]
+    return args
+
+
+def parse_request(argv: Sequence[str]) -> Request:
+    """Parse a command line, preceded by the arguments of its preset."""
+    parser = build_parser()
+    argv = attach_selection_values(argv)
+    preset = parser.parse_args(argv).preset
+    args = vars(parser.parse_args([*PRESETS[preset], *argv]))
+    del args["preset"]
+    for name in ("system_prompt", "appended_system_prompt"):
+        if (value := args[name]) is not None and value.startswith("@"):
+            args[name] = Path(value[1:]).read_text()
+    request = Request(**args)
+    tools = request.tools
+    if (
+        unknown := ((tools.names or frozenset()) | tools.added | tools.removed)
+        - TOOLS.keys()
+    ):
+        parser.error(f"Unknown tools: {', '.join(sorted(unknown))}")
+    return request
+
+
+def candidate_harnesses(model: str) -> tuple[Harness, ...]:
+    """List the harnesses able to run a model, by preference."""
+    if model.startswith("claude-") or model in CLAUDE_ALIASES:
+        return (Harness.CLAUDE,)
+    if model.startswith("gpt-"):
+        return (Harness.HAX, Harness.PI)
+    raise SystemExit(f"Unknown model family: {model}")
+
+
+def project_dirs() -> list[Path]:
+    """List the working directory and its parents, up to the git repository root when there is one."""
+    cwd = Path.cwd()
+    dirs = [cwd, *cwd.parents]
+    for index, directory in enumerate(dirs):
+        if (directory / ".git").exists():
+            return dirs[: index + 1]
+    return dirs
+
+
+def skill_roots(harness: Harness) -> list[Path]:
+    """List the directories a harness discovers skills in, by precedence."""
+    home = Path.home()
+    projects = project_dirs()
+    match harness:
+        case Harness.CLAUDE:
+            return [home / ".claude/skills", *(d / ".claude/skills" for d in projects)]
+        case Harness.PI:
+            return [
+                Path.cwd() / ".pi/skills",
+                *(d / ".agents/skills" for d in projects),
+                home / ".pi/agent/skills",
+                home / ".agents/skills",
+            ]
+        case Harness.HAX:
+            return [
+                *(d / ".agents/skills" for d in projects),
+                home / ".agents/skills",
+                home / ".config/hax/skills",
+            ]
+
+
+def find_skills(harness: Harness) -> dict[str, Path]:
+    """Map each skill a harness discovers, then each other one of the shared skill directory, to its directory."""
+    roots = skill_roots(harness)
+    shared = Path.home() / ".config/agents/skills"
+    if shared.resolve() not in {root.resolve() for root in roots}:
+        roots.append(shared)
+    skills: dict[str, Path] = {}
+    for root in roots:
+        for skill_file in sorted(root.glob("*/SKILL.md")):
+            skills.setdefault(skill_file.parent.name, skill_file.parent)
+    return skills
+
+
+def require_skills(found: dict[str, Path], names: Iterable[str]) -> list[Path]:
+    """Look up the directories of skills, sorted by name."""
+    names = sorted(names)
+    if missing := [name for name in names if name not in found]:
+        raise UnsatisfiableError(f"has no skill {', '.join(missing)}")
+    return [found[name] for name in names]
+
+
+def with_invoked_skill(skills: Selection, invoked: str | None) -> Selection:
+    """Add the invoked skill, if any, to a skill selection."""
+    return (
+        skills if invoked is None else skills.adjust(frozenset({invoked}), frozenset())
+    )
+
+
+def harness_tools(harness: Harness, tools: Collection[str]) -> list[str]:
+    """Translate tool names into those of a harness taking a tool list, in a fixed order."""
+    if lacking := sorted(tool for tool in tools if harness not in TOOLS[tool]):
+        raise UnsatisfiableError(f"has no {', '.join(lacking)} tool")
+    return [
+        name
+        for tool, names in TOOLS.items()
+        if tool in tools
+        for name in names[harness]
+    ]
+
+
+def claude_tool_args(tools: Selection, *, skill_tool: bool) -> list[str]:
+    """Build the claude arguments enabling a tool selection."""
+    skill = ["Skill"] if skill_tool else []
+    removed = harness_tools(Harness.CLAUDE, tools.removed)
+    if tools.names is None and not tools.added:
+        disallowed = [*removed, *([] if skill_tool else ["Skill"])]
+        return ["--disallowedTools", ",".join(disallowed)] if disallowed else []
+    enabled = (
+        [*CLAUDE_OWN_TOOLS, *harness_tools(Harness.CLAUDE, tools.added)]
+        if tools.names is None
+        else harness_tools(Harness.CLAUDE, tools.names)
+    )
+    kept = [name for name in dict.fromkeys(enabled) if name not in removed]
+    return ["--tools", ",".join([*kept, *skill])]
+
+
+def claude_skill_settings(skills: Selection) -> dict[str, object]:
+    """Build the claude settings applying a non-empty skill selection."""
+    found = find_skills(Harness.CLAUDE)
+    if skills.names is None:
+        require_skills(found, skills.added)
+        overrides = dict.fromkeys(sorted(skills.added), "on") | dict.fromkeys(
+            sorted(skills.removed), "off"
+        )
+        return {"skillOverrides": overrides} if overrides else {}
+    require_skills(found, skills.names)
+    return {
+        "disableBundledSkills": True,
+        "skillOverrides": {
+            name: "on" if name in skills.names else "off"
+            for name in sorted(found.keys() | CLAUDE_UNBUNDLED_SKILLS)
+        },
+    }
+
+
+def claude_settings(request: Request, skills: Selection) -> dict[str, object]:
+    """Build the claude settings a request implies."""
+    settings: dict[str, object] = {}
+    if not request.instruction_files:
+        settings["claudeMdExcludes"] = ["**"]
+    if not request.memory:
+        settings["autoMemoryEnabled"] = False
+    if not request.git_context:
+        settings["includeGitInstructions"] = False
+    if skills.names != frozenset():
+        settings |= claude_skill_settings(skills)
+    return settings
+
+
+def claude_launch(request: Request, prompt: str) -> Launch:
+    """Build the claude launch of a request."""
+    skills = with_invoked_skill(request.skills, request.invoked_skill)
+    argv = ["claude", "--model", request.model]
+    if request.effort is not None:
+        argv += ["--effort", "low" if request.effort == "none" else request.effort]
+    argv += claude_tool_args(request.tools, skill_tool=skills.names != frozenset())
+    if skills.names == frozenset():
+        argv.append("--disable-slash-commands")
+    if not request.mcp:
+        argv.append("--strict-mcp-config")
+    argv += system_prompt_args(request.system_prompt, request.appended_system_prompt)
+    if settings := claude_settings(request, skills):
+        argv += ["--settings", json.dumps(settings)]
+    if request.max_turns is not None:
+        argv += ["--max-turns", str(request.max_turns)]
+    argv += session_args(request, no_session="--no-session-persistence")
+    if request.events:
+        argv += ["--output-format", "stream-json", "--verbose"]
+    argv += ["--permission-mode", "bypassPermissions", "-p"]
+    if request.invoked_skill is not None:
+        prompt = f"/{request.invoked_skill} {prompt}"
+    return Launch(argv, {}, prompt)
+
+
+def system_prompt_args(system_prompt: str | None, appended: str | None) -> list[str]:
+    """Build the arguments replacing and appending to the system prompt."""
+    args = [] if system_prompt is None else ["--system-prompt", system_prompt]
+    return args + ([] if appended is None else ["--append-system-prompt", appended])
+
+
+def session_args(request: Request, *, no_session: str) -> list[str]:
+    """Build the arguments naming the session or turning it off."""
+    if request.session_id is not None:
+        return ["--session-id", str(request.session_id)]
+    return [] if request.session else [no_session]
+
+
+def pi_tool_args(tools: Selection) -> list[str]:
+    """Build the pi arguments enabling a tool selection."""
+    if "web" in (tools.added if tools.names is None else tools.names):
+        settings = Path.home() / ".pi/agent/settings.json"
+        if not (
+            settings.is_file()
+            and PI_WEB_PACKAGE in json.loads(settings.read_text()).get("packages", [])
+        ):
+            raise UnsatisfiableError(
+                f"has no web tool without the {PI_WEB_PACKAGE} package in {settings}"
+            )
+    if tools.names == frozenset():
+        return ["--no-tools"]
+    if tools.names is not None:
+        return ["--tools", ",".join(harness_tools(Harness.PI, tools.names))]
+    removed = [tool for tool in tools.removed if Harness.PI in TOOLS[tool]]
+    added = [f"+{name}" for name in harness_tools(Harness.PI, tools.added)]
+    excluded = harness_tools(Harness.PI, removed)
+    return [
+        *(["--tools", ",".join(added)] if added else []),
+        *(["--exclude-tools", ",".join(excluded)] if excluded else []),
+    ]
+
+
+def pi_skill_args(skills: Selection) -> list[str]:
+    """Build the pi arguments loading a skill selection."""
+    if skills.names == frozenset():
+        return ["--no-skills"]
+    found = find_skills(Harness.PI)
+    added = require_skills(found, skills.added)
+    if skills.names is None and not skills.removed:
+        return [arg for path in added for arg in ("--skill", str(path))]
+    names = found.keys() - skills.removed if skills.names is None else skills.names
+    return [
+        "--no-skills",
+        *(
+            arg
+            for path in require_skills(found, names)
+            for arg in ("--skill", str(path))
+        ),
+    ]
+
+
+def pi_launch(request: Request, prompt: str) -> Launch:
+    """Build the pi launch of a request."""
+    if request.max_turns is not None:
+        raise UnsatisfiableError("has no turn cap")
+    model = f"openai-codex/{request.model}"
+    if request.effort is not None:
+        model += f":{'off' if request.effort == 'none' else request.effort}"
+    argv = ["pi", "--model", model, *pi_tool_args(request.tools)]
+    argv += pi_skill_args(with_invoked_skill(request.skills, request.invoked_skill))
+    if not request.instruction_files:
+        argv.append("--no-context-files")
+    if not request.mcp:
+        argv.append("--no-mcp")
+    system_prompt = request.system_prompt
+    appended = request.appended_system_prompt
+    if system_prompt == "":
+        system_prompt = PI_PLACEHOLDER_SYSTEM_PROMPT
+        # an empty appendix, else pi appends its APPEND_SYSTEM.md
+        if appended is None:
+            appended = ""
+    argv += system_prompt_args(system_prompt, appended)
+    argv += session_args(request, no_session="--no-session")
+    if request.events:
+        argv += ["--mode", "json"]
+    argv.append("-p")
+    if request.invoked_skill is not None:
+        prompt = f"/skill:{request.invoked_skill} {prompt}"
+    return Launch(argv, {}, prompt)
+
+
+def hax_tool_env(tools: Selection) -> dict[str, str]:
+    """Build the hax environment enabling a non-empty tool selection."""
+    if tools.names is None:
+        if lacking := sorted(tools.added - HAX_OWN_TOOLS):
+            raise UnsatisfiableError(f"has no {', '.join(lacking)} tool")
+        if fixed_removals := sorted(tools.removed & HAX_FIXED_TOOLS):
+            raise UnsatisfiableError(
+                f"cannot remove its {', '.join(fixed_removals)} tool"
+            )
+        return {"HAX_NO_SUBAGENTS": "1"} if "subagent" in tools.removed else {}
+    if tools.names - {"subagent"} != HAX_FIXED_TOOLS:
+        raise UnsatisfiableError(
+            f"takes no tool list but {','.join(tool for tool in TOOLS if tool in HAX_FIXED_TOOLS)}, with or without subagent"
+        )
+    return {"HAX_NO_TASKS": "1"} | (
+        {} if "subagent" in tools.names else {"HAX_NO_SUBAGENTS": "1"}
+    )
+
+
+def hax_skill_env(skills: Selection) -> dict[str, str]:
+    """Build the hax environment loading a skill selection."""
+    if skills.names == frozenset():
+        return {"HAX_NO_SKILLS": "1"}
+    if skills.names is not None or skills.removed:
+        raise UnsatisfiableError("loads all skills or none")
+    require_skills(find_skills(Harness.HAX), skills.added)
+    return {}
+
+
+def hax_environment(request: Request) -> dict[str, str]:
+    """Build the hax environment of a request keeping some tools."""
+    env = hax_tool_env(request.tools) | hax_skill_env(request.skills)
+    if not request.instruction_files:
+        env["HAX_NO_AGENTS_MD"] = "1"
+    if request.system_prompt is not None:
+        env["HAX_SYSTEM_PROMPT"] = request.system_prompt
+    if request.appended_system_prompt is not None:
+        env["HAX_SYSTEM_PROMPT_APPEND"] = request.appended_system_prompt
+    return env
+
+
+def hax_effort(model: str, effort: str) -> str:
+    """Raise an effort level to the lowest one hax's catalog gives the model from there up."""
+    catalog_path = Path.home() / ".cache/hax/catalog.json"
+    if not catalog_path.is_file():
+        raise UnsatisfiableError(f"has no model catalog at {catalog_path}")
+    models = json.loads(catalog_path.read_text())["openai"]["models"]
+    if model not in models:
+        raise UnsatisfiableError(f"has no model {model} in {catalog_path}")
+    (levels,) = (
+        option["values"]
+        for option in models[model]["reasoning_options"]
+        if option["type"] == "effort"
+    )
+    for level in EFFORTS[EFFORTS.index(effort) :]:
+        if level in levels:
+            return level
+    raise UnsatisfiableError(f"has no effort level from {effort} up for {model}")
+
+
+def hax_launch(request: Request, prompt: str) -> Launch:
+    """Build the hax launch of a request."""
+    if request.mcp:
+        raise UnsatisfiableError("has no MCP support")
+    if request.session_id is not None:
+        raise UnsatisfiableError("takes no session id")
+    raw_mode = request.tools.names == frozenset()
+    if raw_mode and (
+        request.skills.names != frozenset()
+        or request.invoked_skill is not None
+        or request.instruction_files
+        or request.system_prompt != ""
+        or request.appended_system_prompt is not None
+    ):
+        raise UnsatisfiableError(
+            "removes all tools only along with skills, instruction files and system prompt"
+        )
+    env = {} if raw_mode else hax_environment(request)
+    flags = ["--raw"] if raw_mode else []
+    if request.max_turns is not None:
+        env["HAX_MAX_TURNS"] = str(request.max_turns)
+    if request.events:
+        flags.append("--json")
+    if not request.session:
+        flags.append("--no-session")
+    argv = ["hax", *flags, "--provider=codex", f"--model={request.model}"]
+    if request.effort is not None:
+        argv.append(f"--effort={hax_effort(request.model, request.effort)}")
+    if request.invoked_skill is not None:
+        (path,) = require_skills(find_skills(Harness.HAX), [request.invoked_skill])
+        prompt = (
+            f"Read {path / 'SKILL.md'} and follow its instructions. Arguments: {prompt}"
+        )
+    return Launch([*argv, "-p"], env, prompt)
+
+
+def auth_env(harness: Harness, auth: str | None) -> dict[str, str]:
+    """Build the environment selecting a harness's sandbox auth profile, refusing a change of profile inside a sandbox."""
+    if auth is None:
+        return {}
+    variable = f"SANDBOX_AGENT_{harness.upper()}_AUTH"
+    mounted = os.environ.get(variable)
+    if SANDBOX_DIR.is_dir() and mounted != auth:
+        profile = "the default one" if mounted is None else mounted
+        raise UnsatisfiableError(
+            f"cannot switch from the auth profile its sandbox mounted, {profile}"
+        )
+    return {variable: auth}
+
+
+def select_launch(request: Request, prompt: str) -> Launch:
+    """Build the launch of a request on the first candidate harness satisfying all its constraints."""
+    harnesses = candidate_harnesses(request.model)
+    if request.harness is not None:
+        if request.harness not in harnesses:
+            raise SystemExit(f"Harness {request.harness} does not run {request.model}")
+        harnesses = (request.harness,)
+    refusals = []
+    for harness in harnesses:
+        if shutil.which(harness) is None:
+            refusals.append(f"  {harness}: is not installed")
+            continue
+        try:
+            env = auth_env(harness, request.auth)
+            launch = {
+                Harness.CLAUDE: claude_launch,
+                Harness.PI: pi_launch,
+                Harness.HAX: hax_launch,
+            }[harness](request, prompt)
+        except UnsatisfiableError as refusal:
+            refusals.append(f"  {harness}: {refusal}")
+            continue
+        launch.env |= env
+        return launch
+    raise SystemExit("\n".join(["No harness can satisfy the request:", *refusals]))
+
+
+def shell_overlap(tools: Selection) -> list[str]:
+    """List the named tools the shell covers, when the shell is enabled alongside them."""
+    if tools.names is None:
+        named, shell = tools.added, "shell" not in tools.removed
+    else:
+        named, shell = tools.names, "shell" in tools.names
+    return sorted(named & SHELL_COVERED_TOOLS) if shell else []
+
+
+def die_with_parent() -> None:
+    """Have the calling process receive SIGKILL when its parent dies."""
+    if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL):
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+
+
+def run_child(launch: Launch, stdin: IO[bytes]) -> NoReturn:
+    """Run hax as a child, show its stderr only if it fails, and exit as it did."""
+    inherited = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in HAX_LAUNCH_VARIABLES
+    }
+    with tempfile.TemporaryFile() as stderr:
+        with subprocess.Popen(
+            launch.argv,
+            stdin=stdin,
+            stdout=None,
+            stderr=stderr,
+            env=inherited | launch.env,
+            # no other way to set the parent-death signal
+            preexec_fn=die_with_parent,  # noqa: PLW1509
+        ) as child:
+            for signum in FORWARDED_SIGNALS:
+                signal.signal(signum, lambda signum, _frame: child.send_signal(signum))
+            status = child.wait()
+        if status:
+            stderr.seek(0)
+            shutil.copyfileobj(stderr, sys.stderr.buffer)
+            sys.stderr.flush()
+    if status < 0:
+        if -status != signal.SIGKILL:
+            signal.signal(-status, signal.SIG_DFL)
+        os.kill(os.getpid(), -status)
+    sys.exit(status)
+
+
+def main() -> None:
+    """Start the harness a command line translates into."""
+    request = parse_request(sys.argv[1:])
+    prompt = " ".join(request.prompt) if request.prompt else sys.stdin.read()
+    launch = select_launch(request, prompt)
+    if overlap := shell_overlap(request.tools):
+        print(
+            f"Warning: the shell already covers {', '.join(overlap)}, and models are better trained to do it through the shell",
+            file=sys.stderr,
+        )
+    with tempfile.TemporaryFile() as stdin:
+        stdin.write(launch.stdin.encode())
+        stdin.seek(0)
+        if launch.argv[0] == Harness.HAX:
+            run_child(launch, stdin)
+        os.dup2(stdin.fileno(), sys.stdin.fileno())
+    os.execvpe(launch.argv[0], launch.argv, os.environ | launch.env)
+
+
+if __name__ == "__main__":
+    main()

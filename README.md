@@ -20,11 +20,12 @@ Instead of adding complexity like some [other](https://github.com/earendil-works
 
 ## Content
 
-This is made from 3 parts:
+This is made from 4 parts:
 
 - [`sandbox-coding-agent`](#sandbox-coding-agent): a [Bubblewrap](https://github.com/containers/bubblewrap) based wrapper, that runs coding agents in an isolated environment, sharing some directories only.
 - [`agent-proxy`](#agent-proxy): an optional host-side [mitmproxy](https://mitmproxy.org/) user service that lets [`gh`](https://github.com/cli/cli) reach the GitHub API from inside the sandbox without exposing the token to the agent.
 - [`agent-microvm`](#agent-microvm): a [skill](https://agentskills.io/) the agent can use to spawn a throwaway microVM and run privileged commands in it, completely isolated from the host.
+- [`agent-worker`](#agent-worker): a launcher starting a coding agent non-interactively, with restricted tools, skills and instructions, for multi-agent workflows.
 
 The sandbox and microVM scripts were preceded by experiments with different container ([Firejail](https://github.com/netblue30/firejail), [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)) and VMM ([CrosVM](https://github.com/google/crosvm), [cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Firecracker](https://firecracker-microvm.github.io/), [systemd-vmspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-vmspawn.html)) solutions, and were then refined during months of daily use.
 
@@ -151,6 +152,46 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
 
 1. Install the `agent-microvm` skill for your agent of choice. Look up its documentation for the possible locations.
 2. Ask the agent to use the skill, or let it use it when it sees fit.
+
+## `agent-worker`
+
+### Features
+
+- Starts [Claude Code](https://claude.com/product/claude-code), [hax](https://usehax.dev/) or [Pi](https://pi.dev/) non-interactively: no permission prompt, prompt from the arguments or stdin, final answer or JSON event stream on stdout
+- One command line for all three harnesses, abstracting away most of their differences, and simpler than any of theirs: presets (`full`, `lean`, `read-only`, `bare`) adjusted by arguments for tools, skills, instruction files, memory, git context, MCP and system prompt
+- Picks the harness from the model and the constraints: Anthropic models go to Claude Code, GPT models to hax, or to Pi when hax can not satisfy the request
+- Shows hax's stderr, written on every run, only when it fails
+
+For example:
+
+`agent-worker --preset read-only --tools +web --model opus --no-session --json --invoke-skill security-review -- change.diff`
+
+runs:
+
+`echo '/security-review change.diff' | claude --model opus --tools Read,Grep,Glob,WebFetch,WebSearch,Skill --strict-mcp-config --settings '{"autoMemoryEnabled": false, "includeGitInstructions": false, "disableBundledSkills": true, "skillOverrides": {"agent-microvm": "off", "changelog": "off", "commit-message": "off", "docx": "off", "frontend-design": "off", "pdf": "off", "plugin-authoring": "off", "security-review": "on", "test-writer": "off"}}' --no-session-persistence --output-format stream-json --verbose --permission-mode bypassPermissions -p`
+
+### Requirements
+
+- Python 3.13+
+- The harnesses to run, on `PATH`
+- For web access on Pi, the [`pi-web-access`](https://github.com/nicobailon/pi-web-access) package, in Pi's user settings
+
+### Usage
+
+1. Copy `agent-worker/agent-worker` in `~/.local/bin`
+
+2. Run it with a preset, adjusted by other arguments as needed:
+
+```sh
+# a bare model call, the prompt on stdin
+{ echo 'Write a commit message for this diff:'; git diff; } |
+  agent-worker --preset bare --model gpt-6-luna --effort none --no-session
+
+# read and search tools only, for a review that does not change files
+git diff > change.diff
+agent-worker --preset read-only --model claude-fable-5-1 --effort xhigh -- \
+  'Review the patch in change.diff for bugs, and the full content of all changed files'
+```
 
 ## License
 

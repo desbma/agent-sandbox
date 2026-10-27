@@ -936,6 +936,7 @@ You are running in a `bwrap` based sandbox, set up by the `{LAUNCHER_HOST_PATH}`
 # tools to expose in sandbox, even if not under /usr
 HOME_TOOLS = [
     *([editor] if (editor := os.environ.get("EDITOR")) is not None else []),
+    "agent-worker",
     "bat",
     "chezmoi",
     "d2",

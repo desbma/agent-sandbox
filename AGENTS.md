@@ -1,13 +1,11 @@
 # agent-sandbox
 
-Tooling to run coding agents (Claude Code, Codex, Amp, hax, pi) inside tight, disposable sandboxes on the host, without ever needing `sudo`. Two layers are assembled here and used together:
+Tooling to run coding agents (Claude Code, Codex, Amp, hax, pi) inside tight, disposable sandboxes on the host, without ever needing `sudo`:
 
-- **`sandbox-coding-agent`** (repository root) — the default host boundary. A Bubblewrap launcher that starts an agent in a locked-down namespace: the home directory and most of `/etc` are replaced by tmpfs or read-only binds, the working directory and a few caches are the only writable host paths, and the agent's global instructions are assembled from the user's base file, an optional agent specific one, and a generated sandbox-specific section. It also exposes `/dev/kvm` so the inner microVM can boot. Before executing bwrap, the launcher moves itself into new user and network namespaces, which [pasta](https://passt.top/) attaches to by PID: the agent is cut off from host loopback, except the DNS port and the proxy's, while TCP servers it starts on its own loopback are forwarded to the host's `127.0.0.1`. pasta never spawns bwrap itself: it would close the memfds bwrap reads generated files from, and leave SIGUSR1 blocked in the sandbox.
-- **`agent-microvm/`** — an escalation path for tasks the bwrap sandbox denies (real root, mounting images, low-level networking, privileged services). It boots a throwaway, root-capable Alpine microVM via rootless QEMU, nested inside the bwrap sandbox, and is also packaged as the `agent-microvm` Claude skill. Its design intent lives in the [agent-microvm component](#agent-microvm-component) section below; `agent-microvm/SKILL.md` covers usage.
-
-The two compose: an agent normally lives in the bwrap sandbox and reaches for the microVM only when it needs privileges the sandbox withholds. Because the microVM runs inside the bwrap sandbox, everything stays doubly contained and is discarded on exit.
-
-Alongside these, **`agent-proxy/`** is an optional host-side [mitmproxy](https://mitmproxy.org/) user service: it injects a real GitHub token into `gh`'s requests to `api.github.com` so the agent can use the GitHub API without the sandbox ever holding the token. When the service is running, `sandbox-coding-agent` sets `HTTPS_PROXY` for the whole sandbox, so the proxy carries all of the sandbox's HTTPS traffic: it intercepts `api.github.com` and tunnels every other host as raw TCP. It bounds how long a tunnel outlives a silently dead upstream connection (ie. across a laptop suspend) by enabling TCP keepalive and `TCP_USER_TIMEOUT` on upstream sockets. mitmproxy exposes no option or hook reaching those sockets, so the module's `load` hook wraps `asyncio.open_connection`, which mitmproxy looks up at call time; only the integration test below catches a mitmproxy release that bypasses the wrapper. Being the sandbox's one path back to host loopback, the proxy also refuses upstream hosts resolving to a loopback or unspecified address; the same wrapper enforces it, resolving the host once and connecting only to the addresses it checked. README covers setup.
+- **`sandbox-coding-agent`** (repository root): the default host boundary, a Bubblewrap launcher giving the agent a locked-down filesystem and its own network, cut off from host loopback. pasta must never spawn bwrap itself: it would close the memfds bwrap reads generated files from, and leave SIGUSR1 blocked in the sandbox.
+- **`agent-microvm/`**: an escalation path for tasks the sandbox denies (real root, mounting images, low-level networking, privileged services), booting a throwaway, root-capable microVM nested inside the sandbox, so everything stays doubly contained. It is packaged as a skill; see the [agent-microvm component](#agent-microvm-component) section.
+- **`agent-proxy/`**: an optional host-side mitmproxy service giving `gh` access to the GitHub API without the sandbox ever holding the token, and carrying all of the sandbox's HTTPS traffic. mitmproxy exposes no hook reaching upstream sockets, so the proxy patches how mitmproxy opens them; only its integration test catches a mitmproxy release that bypasses the patch.
+- **`agent-worker/`**: a launcher starting a coding-agent harness non-interactively, for multi-agent workflows. The harness behavior it relies on was checked against Claude Code 2.1.309, pi 1.4.0 and hax 0.6.1, and can drift with later releases.
 
 ## Code Style
 
@@ -37,51 +35,42 @@ These conventions apply repository-wide, to test code as much as to main code.
 
 ## Testing, Linting & Formatting
 
-All code must pass linting, type checking, and formatting under the single strict config in the root `pyproject.toml` (ruff `select = ["ALL"]`), without `sudo`. From the repository root:
+All code must pass linting, type checking and formatting under the strict config in the root `pyproject.toml`, and every unit suite must pass, all without `sudo`. Extensionless scripts must be listed in `pyproject.toml`, ruff's and ty's directory traversal skipping them. From the repository root, then from each of `agent-microvm/` and `agent-worker/` for their unit suites:
 
 ```sh
 ruff check
 ruff format --check
 ty check
-```
-
-The extensionless scripts (`sandbox-coding-agent`, `agent-microvm/agent-microvm` and `agent-proxy/agent-proxy`) are pulled into both tools' file discovery (ruff `extend-include`, ty `src.include`); directory traversal would otherwise skip them. `sandbox-coding-agent` is covered by the root `tests/` directory: a unit suite that loads the launcher script as a module, and an opt-in integration suite that starts real pasta and bubblewrap sandboxes against synthetic home/XDG trees. The integration suite needs `/dev/net/tun`, which the agent sandbox withholds, so it runs in an agent-microvm guest: `tests/microvm-integration.sh` sets up a Debian root there with `bwrap`, `pasta`, `/dev/net/tun`, `/dev/kvm` and outbound network, and runs both suites. From the repository root, the unit suite, then both suites:
-
-```sh
 python3 -m unittest discover -s tests
-# runs SANDBOX_CODING_AGENT_INTEGRATION=1 python3 -m unittest discover -s tests in a microVM's Debian root
+```
+
+Opt-in suites, from the repository root:
+
+```sh
+# sandbox-coding-agent integration and unit suites, in a microVM's Debian root: they need /dev/net/tun, which the agent sandbox withholds
 agent-microvm/agent-microvm bash workspace/tests/microvm-integration.sh
-```
-
-An opt-in performance test, on the same synthetic trees, uses [hyperfine](https://github.com/sharkdp/hyperfine) to time a stub `claude` agent and `true`, run directly and through the launcher, prints both medians, and bounds the wall time the launcher adds. It needs `hyperfine` 2 or later and `jj` on top of what the integration suite needs, so it does not run inside the agent sandbox either. From the repository root:
-
-```sh
+# sandbox-coding-agent performance: also needs hyperfine 2 or later and jj, so it does not run inside the agent sandbox either
 SANDBOX_CODING_AGENT_PERFORMANCE=1 python3 -m unittest discover -s tests -p test_performance.py
-```
-
-`agent-proxy` is covered by the same directory: unit tests of its upstream connection opener, and an opt-in integration suite that runs the real proxy in private user, mount and network namespaces, against local upstreams standing in for remote servers and for `api.github.com`. It checks how the proxy answers tunnel requests, the token injection and body streaming of intercepted GitHub API requests, and that a silent tunnel stays open while its upstream lives but closes once netem silently drops its upstream packets (needs `mitmdump`, `openssl`, iproute2, the kernel's netem qdisc and unprivileged user namespaces; takes about three and a half minutes). From the repository root:
-
-```sh
+# agent-proxy integration: needs mitmdump, openssl, iproute2, the netem qdisc and unprivileged user namespaces; takes about 3.5 minutes
 AGENT_PROXY_INTEGRATION=1 python3 -m unittest discover -s tests -p test_agent_proxy.py
 ```
 
-`agent-microvm` adds a unit suite that must also pass without `sudo`, an opt-in VM-booting integration suite that needs outbound network, and an opt-in performance test that uses `hyperfine` 2 or later to time a whole session running `true` on a warm artifact cache, prints its median, and bounds it. From `agent-microvm/`:
+From `agent-microvm/`:
 
 ```sh
-python3 -m unittest discover -s tests
+# needs outbound network
 AGENT_MICROVM_INTEGRATION=1 python3 -m unittest tests.test_integration
+# needs hyperfine 2 or later
 AGENT_MICROVM_PERFORMANCE=1 python3 -m unittest tests.test_performance
 ```
 
-To exercise a change end to end, boot a real VM with a command, e.g. `./agent-microvm uname -a`; the first run downloads Alpine artifacts and builds the rootfs.
+To exercise an `agent-microvm` change end to end, boot a real VM with a command, e.g. `./agent-microvm uname -a`; the first run downloads Alpine artifacts and builds the rootfs.
 
 ## agent-microvm component
 
-Design intent and constraints behind the `agent-microvm/agent-microvm` launcher that the code and `SKILL.md` do not make obvious:
+Design intent the code does not make obvious:
 
-- **Session-bound, throwaway lifetime.** A VM lives exactly one foreground SSH session: it powers off when the session ends, and the launcher kills QEMU/virtiofsd when the `ssh` client exits (closed terminal, dropped link, or a signal received before `ssh` owns the tty). No orphaned VMs survive.
-- **Native SIGINT.** Ctrl-C inside the session must reach the foreground guest process, not kill the VM, so interactive programs can be interrupted without losing the session.
-- **Native terminal UX.** Correct `TERM`/terminfo/locale, a real controlling TTY, working Ctrl-C/Ctrl-Z/job control, dynamic resize propagation, and no visible boot noise unless `SANDBOX_AGENT_DEBUG` is set.
-- **Rejected alternatives.** The baseline is rootless QEMU `microvm` with SSH over passt TCP; virtio-serial SSH, TAP/bridge networking, and vsock were considered and rejected for this path.
-- **Bump `PREPARE_RECIPE_VERSION`** on any change to the guest init recipe or baked artifact contents, or existing caches keep running the old recipe.
-- **Self-pruning artifact cache.** Each launch deletes the cached directories of other Alpine versions, skipping any whose `flock` is held by a live build or session; kernel locks die with their holder, so a crash never leaves a directory permanently undeletable.
+- **Session-bound lifetime.** A VM lives exactly one foreground SSH session, and no VM outlives it, whatever ends the session.
+- **Native terminal.** Ctrl-C reaches the foreground guest process instead of killing the VM, the terminal behaves as on the host (type, locale, job control, resizes), and boot shows no noise unless debugging.
+- **Rejected alternatives.** Virtio-serial SSH, TAP/bridge networking and vsock were considered and rejected in favor of rootless QEMU `microvm` with SSH over passt TCP.
+- **Recipe version.** Bump it on any change to the guest init recipe or baked artifact contents, or existing caches keep running the old recipe.

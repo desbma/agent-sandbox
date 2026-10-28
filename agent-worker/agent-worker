@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Start a coding-agent harness non-interactively, with a restricted set of tools, skills and instructions."""
+"""Start a coding-agent harness non-interactively, with restricted capabilities and instructions."""
 
 import argparse
 import ctypes
@@ -16,7 +16,7 @@ import sys
 import tempfile
 import textwrap
 import uuid
-from collections.abc import Collection, Container, Iterable, Sequence
+from collections.abc import Collection, Container, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import IO, NoReturn, Self
 
@@ -32,7 +32,13 @@ class Harness(enum.StrEnum):
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 CLAUDE_ALIASES = frozenset({"fable", "haiku", "opus", "sonnet"})
 DEFAULT_PRESET = "full"
-RESTRICTED_PRESET_ARGS = ("--no-skills", "--no-memory", "--no-git-context", "--no-mcp")
+RESTRICTED_PRESET_ARGS = (
+    "--no-skills",
+    "--no-extensions",
+    "--no-memory",
+    "--no-git-context",
+    "--no-mcp",
+)
 PRESETS = {
     "full": ("--no-mcp",),
     "lean": ("--tools", "shell", *RESTRICTED_PRESET_ARGS),
@@ -106,11 +112,29 @@ HAX_LAUNCH_VARIABLES = frozenset(
     }
 )
 PI_PLACEHOLDER_SYSTEM_PROMPT = "You are a helpful assistant."
-# pi package providing the web tools
-PI_WEB_PACKAGE = "npm:pi-web-access"
+# pi's directory in the view of the sandbox pi runs in, pi expanding the ~ itself
+PI_SANDBOX_DIR = Path("~/.pi")
+# pi's built-in extensions, mcp aside
+PI_BUILTIN_EXTENSIONS = ("codemode", "llama.cpp", "tool-search")
+# files making a directory a pi extension
+PI_EXTENSION_ENTRIES = ("index.ts", "index.js", "package.json")
+# files hiding entries of a directory from pi's discovery
+PI_IGNORE_FILES = (".gitignore", ".ignore", ".fdignore")
+# pi extension providing the web tools
+PI_WEB_EXTENSION = "pi-web-access"
 SELECTION_ADJUSTMENT_HELP = (
     "adjustments to the preset's, ?NAME adding NAME only if the harness has it"
 )
+# metavar and help of each option taking a selection of names, then the help of the option turning it off
+SELECTION_OPTIONS = {
+    "tools": (f"[+|-|?]{{{','.join(TOOLS)}}},...", "Tools", "Enable no tool"),
+    "skills": ("[+|-|?]NAME,...", "Skills", "Load no skill"),
+    "extensions": (
+        "[+|-|?]NAME,...",
+        "Pi extensions (by built-in, file stem, directory or npm package name) or claude plugins (NAME@MARKETPLACE)",
+        "Load no pi extension or claude plugin, besides the pi extension supplying requested web tools",
+    ),
+}
 # help of each on/off option pair, the option first
 BOOLEAN_OPTIONS = {
     "instruction-files": (
@@ -139,12 +163,17 @@ class UnsatisfiableError(Exception):
 
 @dataclasses.dataclass(frozen=True)
 class Selection:
-    """Set of tool or skill names: an explicit one, or the harness's own adjusted by additions and removals, along with optional names a harness adds only if it has them."""
+    """Set of names of what a harness loads or enables: an explicit one, or the harness's own adjusted by additions and removals, along with optional names a harness adds only if it has them."""
 
     names: frozenset[str] | None
     added: frozenset[str] = frozenset()
     optional: frozenset[str] = frozenset()
     removed: frozenset[str] = frozenset()
+
+    @property
+    def mentioned(self) -> frozenset[str]:
+        """Names the selection lists, adds, optionally adds or removes."""
+        return (self.names or frozenset()) | self.added | self.optional | self.removed
 
     def adjust(
         self,
@@ -186,6 +215,7 @@ class Request:
     harness: Harness | None
     tools: Selection
     skills: Selection
+    extensions: Selection
     invoked_skill: str | None
     instruction_files: bool
     memory: bool
@@ -289,34 +319,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(Harness),
         help="Harness to run, instead of the first one able to satisfy the request",
     )
-    parser.add_argument(
-        "--tools",
-        action=SelectionAction,
-        default=Selection(None),
-        metavar=f"[+|-|?]{{{','.join(TOOLS)}}},...",
-        help=f"Tools, or {SELECTION_ADJUSTMENT_HELP}",
-    )
-    parser.add_argument(
-        "--no-tools",
-        dest="tools",
-        action="store_const",
-        const=Selection(frozenset()),
-        help="Enable no tool",
-    )
-    parser.add_argument(
-        "--skills",
-        action=SelectionAction,
-        default=Selection(None),
-        metavar="[+|-|?]NAME,...",
-        help=f"Skills, or {SELECTION_ADJUSTMENT_HELP}",
-    )
-    parser.add_argument(
-        "--no-skills",
-        dest="skills",
-        action="store_const",
-        const=Selection(frozenset()),
-        help="Load no skill",
-    )
+    for name, (metavar, on_help, off_help) in SELECTION_OPTIONS.items():
+        parser.add_argument(
+            f"--{name}",
+            action=SelectionAction,
+            default=Selection(None),
+            metavar=metavar,
+            help=f"{on_help}, or {SELECTION_ADJUSTMENT_HELP}",
+        )
+        parser.add_argument(
+            f"--no-{name}",
+            dest=name,
+            action="store_const",
+            const=Selection(frozenset()),
+            help=off_help,
+        )
     parser.add_argument(
         "--invoke-skill",
         dest="invoked_skill",
@@ -383,12 +400,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def attach_selection_values(argv: Sequence[str]) -> list[str]:
-    """Join each --tools and --skills option with the value after it, as --option=value, unless that value is another long option."""
+    """Join each selection option with the value after it, as --option=value, unless that value is another long option."""
     args = list(argv)
     end = args.index("--") if "--" in args else len(args)
     for index in reversed(range(end - 1)):
         option, value = args[index : index + 2]
-        if option in ("--skills", "--tools") and not value.startswith("--"):
+        if (
+            option.startswith("--")
+            and option[2:] in SELECTION_OPTIONS
+            and not value.startswith("--")
+        ):
             args[index : index + 2] = [f"{option}={value}"]
     return args
 
@@ -404,13 +425,7 @@ def parse_request(argv: Sequence[str]) -> Request:
         if (value := args[name]) is not None and value.startswith("@"):
             args[name] = Path(value[1:]).read_text()
     request = Request(**args)
-    tools = request.tools
-    if (
-        unknown := (
-            (tools.names or frozenset()) | tools.added | tools.optional | tools.removed
-        )
-        - TOOLS.keys()
-    ):
+    if unknown := request.tools.mentioned - TOOLS.keys():
         parser.error(f"Unknown tools: {', '.join(sorted(unknown))}")
     return request
 
@@ -422,6 +437,13 @@ def candidate_harnesses(model: str) -> tuple[Harness, ...]:
     if model.startswith("gpt-"):
         return (Harness.HAX, Harness.PI)
     raise SystemExit(f"Unknown model family: {model}")
+
+
+def harness_dir(harness: Harness) -> Path:
+    """Locate the configuration directory of claude or pi as this process sees it, a sandbox mounting it at ~/.NAME."""
+    if SANDBOX_DIR.is_dir():
+        return Path.home() / f".{harness}"
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / harness
 
 
 def project_dirs() -> list[Path]:
@@ -445,7 +467,7 @@ def skill_roots(harness: Harness) -> list[Path]:
             return [
                 Path.cwd() / ".pi/skills",
                 *(d / ".agents/skills" for d in projects),
-                home / ".pi/agent/skills",
+                harness_dir(Harness.PI) / "agent/skills",
                 home / ".agents/skills",
             ]
         case Harness.HAX:
@@ -469,11 +491,13 @@ def find_skills(harness: Harness) -> dict[str, Path]:
     return skills
 
 
-def require_skills(found: dict[str, Path], names: Iterable[str]) -> list[Path]:
-    """Look up the directories of skills, sorted by name."""
+def require_names[T](
+    found: Mapping[str, T], names: Iterable[str], kind: str
+) -> list[T]:
+    """Look up the values of names, sorted by name."""
     names = sorted(names)
     if missing := [name for name in names if name not in found]:
-        raise UnsatisfiableError(f"has no skill {', '.join(missing)}")
+        raise UnsatisfiableError(f"has no {kind} {', '.join(missing)}")
     return [found[name] for name in names]
 
 
@@ -517,12 +541,12 @@ def claude_skill_settings(skills: Selection) -> dict[str, object]:
     """Build the claude settings applying a non-empty skill selection."""
     found = find_skills(Harness.CLAUDE)
     if skills.names is None:
-        require_skills(found, skills.added)
+        require_names(found, skills.added, "skill")
         overrides = dict.fromkeys(sorted(skills.added), "on") | dict.fromkeys(
             sorted(skills.removed), "off"
         )
         return {"skillOverrides": overrides} if overrides else {}
-    require_skills(found, skills.names)
+    require_names(found, skills.names, "skill")
     return {
         "disableBundledSkills": True,
         "skillOverrides": {
@@ -543,7 +567,24 @@ def claude_settings(request: Request, skills: Selection) -> dict[str, object]:
         settings["includeGitInstructions"] = False
     if skills.names != frozenset():
         settings |= claude_skill_settings(skills)
-    return settings
+    return settings | claude_plugin_settings(request.extensions)
+
+
+def claude_plugin_settings(plugins: Selection) -> dict[str, object]:
+    """Build the claude settings applying a plugin selection."""
+    registry = harness_dir(Harness.CLAUDE) / "plugins/installed_plugins.json"
+    installed = (
+        json.loads(registry.read_text())["plugins"] if registry.is_file() else {}
+    )
+    plugins = plugins.resolve_optional(installed)
+    require_names(installed, plugins.added | (plugins.names or frozenset()), "plugin")
+    if plugins.names is None:
+        overrides = dict.fromkeys(sorted(plugins.added), True) | dict.fromkeys(
+            sorted(plugins.removed), False
+        )
+    else:
+        overrides = {name: name in plugins.names for name in sorted(installed)}
+    return {"enabledPlugins": overrides} if overrides else {}
 
 
 def claude_launch(request: Request, prompt: str) -> Launch:
@@ -585,33 +626,100 @@ def session_args(request: Request, *, no_session: str) -> list[str]:
     return [] if request.session else [no_session]
 
 
+def pi_view(path: Path) -> str:
+    """Render a path in the view of the sandbox pi runs in."""
+    directory = harness_dir(Harness.PI)
+    if path.is_relative_to(directory):
+        return str(PI_SANDBOX_DIR / path.relative_to(directory))
+    return str(path)
+
+
+def pi_package_has_skills(package: Path) -> bool:
+    """Tell whether a pi package declares skills, in its manifest or by convention."""
+    package_json = package / "package.json"
+    metadata = (
+        json.loads(package_json.read_text(encoding="utf-8-sig"))
+        if package_json.is_file()
+        else {}
+    )
+    if isinstance(manifest := metadata.get("pi"), dict):
+        return bool(manifest.get("skills"))
+    return (package / "skills").is_dir()
+
+
+def pi_local_extensions(agent_dir: Path) -> list[tuple[str, Path]]:
+    """List the name and path of each extension of pi's extensions directory, refusing a layout this list cannot follow."""
+    directory = agent_dir / "extensions"
+    if found := [
+        file
+        for file in (*PI_EXTENSION_ENTRIES, *PI_IGNORE_FILES)
+        if (directory / file).is_file()
+    ]:
+        raise UnsatisfiableError(
+            f"cannot select extensions alongside the {found[0]} of its extensions directory"
+        )
+    extensions = []
+    for entry in sorted(directory.glob("[!.]*")):
+        if entry.is_dir() and any(
+            (entry / file).is_file() for file in PI_EXTENSION_ENTRIES
+        ):
+            extensions.append((entry.name, entry))
+        elif entry.is_file() and entry.suffix in (".ts", ".js"):
+            extensions.append((entry.stem, entry))
+    return extensions
+
+
+def pi_npm_packages(agent_dir: Path) -> list[tuple[str, Path]]:
+    """List the name and path of each npm package pi's settings install, refusing settings this list cannot follow."""
+    settings_path = agent_dir / "settings.json"
+    settings = (
+        json.loads(settings_path.read_text(encoding="utf-8-sig"))
+        if settings_path.is_file()
+        else {}
+    )
+    if "extensions" in settings:
+        raise UnsatisfiableError(
+            "cannot select extensions alongside its extensions setting"
+        )
+    packages = []
+    for package in settings.get("packages", []):
+        source = package if isinstance(package, str) else package["source"]
+        if not isinstance(package, str) and package.keys() != {"source"}:
+            raise UnsatisfiableError(
+                f"cannot select extensions alongside the filtered package {source}"
+            )
+        if not source.startswith("npm:"):
+            raise UnsatisfiableError(
+                f"cannot select extensions alongside the non-npm package {source}"
+            )
+        spec = source.removeprefix("npm:")
+        name = spec.rsplit("@", 1)[0] or spec
+        path = agent_dir / "npm/node_modules" / name
+        if not path.is_dir():
+            raise UnsatisfiableError(
+                f"cannot select extensions alongside the package {source}, missing from its npm directory"
+            )
+        packages.append((name, path))
+    return packages
+
+
+def pi_extensions() -> dict[str, str]:
+    """Map each extension pi loads on its own, mcp aside, to its path in pi's view, refusing settings or a layout this map cannot follow."""
+    agent_dir = harness_dir(Harness.PI) / "agent"
+    extensions = {name: f"builtin:{name}" for name in PI_BUILTIN_EXTENSIONS}
+    for name, path in [*pi_local_extensions(agent_dir), *pi_npm_packages(agent_dir)]:
+        if name in extensions:
+            raise UnsatisfiableError(f"has two extensions named {name}")
+        if path.is_dir() and pi_package_has_skills(path):
+            raise UnsatisfiableError(
+                f"cannot select extensions alongside the extension {name} carrying skills"
+            )
+        extensions[name] = pi_view(path)
+    return extensions
+
+
 def pi_tool_args(tools: Selection) -> list[str]:
     """Build the pi arguments enabling a tool selection."""
-    settings = Path.home() / ".pi/agent/settings.json"
-    packages = (
-        json.loads(settings.read_text(encoding="utf-8-sig")).get("packages", [])
-        if settings.is_file()
-        else []
-    )
-    sources = [
-        package if isinstance(package, str) else package["source"]
-        for package in packages
-    ]
-    web = any(
-        source == PI_WEB_PACKAGE or source.startswith(f"{PI_WEB_PACKAGE}@")
-        for source in sources
-    )
-    tools = tools.resolve_optional(
-        {
-            tool
-            for tool, names in TOOLS.items()
-            if Harness.PI in names and (web or tool != "web")
-        }
-    )
-    if not web and "web" in (tools.added if tools.names is None else tools.names):
-        raise UnsatisfiableError(
-            f"has no web tool without the {PI_WEB_PACKAGE} package in {settings}"
-        )
     if tools.names == frozenset():
         return ["--no-tools"]
     if tools.names is not None:
@@ -625,23 +733,66 @@ def pi_tool_args(tools: Selection) -> list[str]:
     ]
 
 
+def pi_selection[T](
+    selection: Selection, found: Mapping[str, T], kind: str
+) -> tuple[bool, list[T]]:
+    """Resolve a selection against what pi discovers, telling whether its discovery goes off and listing the values to load explicitly."""
+    selection = selection.resolve_optional(found)
+    added = require_names(found, selection.added, kind)
+    if selection.names is None and not selection.removed:
+        return False, added
+    names = (
+        found.keys() - selection.removed if selection.names is None else selection.names
+    )
+    return True, require_names(found, names, kind)
+
+
 def pi_skill_args(skills: Selection) -> list[str]:
     """Build the pi arguments loading a skill selection."""
-    found = find_skills(Harness.PI)
-    skills = skills.resolve_optional(found)
-    if skills.names == frozenset():
-        return ["--no-skills"]
-    added = require_skills(found, skills.added)
-    if skills.names is None and not skills.removed:
-        return [arg for path in added for arg in ("--skill", str(path))]
-    names = found.keys() - skills.removed if skills.names is None else skills.names
+    discovery_off, paths = pi_selection(skills, find_skills(Harness.PI), "skill")
     return [
-        "--no-skills",
-        *(
-            arg
-            for path in require_skills(found, names)
-            for arg in ("--skill", str(path))
-        ),
+        *(["--no-skills"] if discovery_off else []),
+        *(arg for path in paths for arg in ("--skill", pi_view(path))),
+    ]
+
+
+def pi_extension_args(
+    extensions: Selection, found: dict[str, str], *, mcp: bool
+) -> list[str]:
+    """Build the pi arguments loading an extension selection, along with the mcp built-in when MCP is on and extension discovery off."""
+    discovery_off, paths = pi_selection(extensions, found, "extension")
+    return [
+        *(["--no-extensions"] if discovery_off else []),
+        *(arg for path in paths for arg in ("-e", path)),
+        *(["-e", "builtin:mcp"] if discovery_off and mcp else []),
+    ]
+
+
+def pi_tool_extension_args(request: Request) -> list[str]:
+    """Build the pi arguments enabling a request's tools and loading its extensions, along with the one providing the web tools."""
+    tools = request.tools
+    extensions = request.extensions
+    found = (
+        pi_extensions()
+        if "web" in (tools.mentioned - tools.removed) or extensions.mentioned
+        else {}
+    )
+    tools = tools.resolve_optional(
+        {
+            tool
+            for tool, names in TOOLS.items()
+            if Harness.PI in names and (tool != "web" or PI_WEB_EXTENSION in found)
+        }
+    )
+    if "web" in (tools.added if tools.names is None else tools.names):
+        if PI_WEB_EXTENSION not in found:
+            raise UnsatisfiableError(
+                f"has no web tool without the {PI_WEB_EXTENSION} extension"
+            )
+        extensions = extensions.adjust(added=frozenset({PI_WEB_EXTENSION}))
+    return [
+        *pi_tool_args(tools),
+        *pi_extension_args(extensions, found, mcp=request.mcp),
     ]
 
 
@@ -652,7 +803,7 @@ def pi_launch(request: Request, prompt: str) -> Launch:
     model = f"openai-codex/{request.model}"
     if request.effort is not None:
         model += f":{'off' if request.effort == 'none' else request.effort}"
-    argv = ["pi", "--model", model, *pi_tool_args(request.tools)]
+    argv = ["pi", "--model", model, *pi_tool_extension_args(request)]
     argv += pi_skill_args(with_invoked_skill(request.skills, request.invoked_skill))
     if not request.instruction_files:
         argv.append("--no-context-files")
@@ -700,7 +851,7 @@ def hax_skill_env(skills: Selection) -> dict[str, str]:
         return {"HAX_NO_SKILLS": "1"}
     if skills.names is not None or skills.removed:
         raise UnsatisfiableError("loads all skills or none")
-    require_skills(find_skills(Harness.HAX), skills.added)
+    require_names(find_skills(Harness.HAX), skills.added, "skill")
     return {}
 
 
@@ -741,6 +892,8 @@ def hax_launch(request: Request, prompt: str) -> Launch:
         raise UnsatisfiableError("has no MCP support")
     if request.session_id is not None:
         raise UnsatisfiableError("takes no session id")
+    if request.extensions.names or request.extensions.added:
+        raise UnsatisfiableError("has no extension support")
     request = dataclasses.replace(
         request,
         tools=request.tools.resolve_optional(HAX_OWN_TOOLS),
@@ -769,7 +922,9 @@ def hax_launch(request: Request, prompt: str) -> Launch:
     if request.effort is not None:
         argv.append(f"--effort={hax_effort(request.model, request.effort)}")
     if request.invoked_skill is not None:
-        (path,) = require_skills(find_skills(Harness.HAX), [request.invoked_skill])
+        (path,) = require_names(
+            find_skills(Harness.HAX), [request.invoked_skill], "skill"
+        )
         prompt = (
             f"Read {path / 'SKILL.md'} and follow its instructions. Arguments: {prompt}"
         )

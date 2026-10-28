@@ -50,11 +50,13 @@ class FakeHomeTestCase(unittest.TestCase):
         """Create the home, project and stub directories, and enter the project."""
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.home = root / "home"
+        self.pi_dir = self.home / ".config/pi"
         project = root / "project"
         (project / ".git").mkdir(parents=True)
         for path, content in (
             (self.home / ".cache/hax/catalog.json", CATALOG),
-            (self.home / ".pi/agent/settings.json", PI_SETTINGS),
+            (self.pi_dir / "agent/settings.json", PI_SETTINGS),
+            (self.pi_dir / "agent/npm/node_modules/pi-web-access/package.json", {}),
         ):
             path.parent.mkdir(parents=True)
             path.write_text(json.dumps(content))
@@ -82,6 +84,12 @@ class FakeHomeTestCase(unittest.TestCase):
             unittest.mock.patch.object(agent_worker, "SANDBOX_DIR", self.sandbox_dir)
         )
         self.enterContext(contextlib.chdir(project))
+
+    def assert_refusal(self, command: str, message: str) -> None:
+        """Check a command line is refused with a message."""
+        with self.assertRaises(SystemExit) as raised:
+            launch(command)
+        self.assertEqual(str(raised.exception), message)
 
 
 def launch(command: str) -> agent_worker.Launch:
@@ -123,7 +131,7 @@ class TranslationTests(FakeHomeTestCase):
             with self.subTest(option=option):
                 self.assert_launch(
                     f"--preset bare --harness pi --model gpt-6.1-sol --effort none --no-session {option} -- PROMPT",
-                    argv=f"pi --model openai-codex/gpt-6.1-sol:off --no-tools --no-skills --no-context-files --no-mcp --system-prompt 'You are a helpful assistant.' --append-system-prompt {appended} --no-session -p",
+                    argv=f"pi --model openai-codex/gpt-6.1-sol:off --no-tools --no-extensions --no-skills --no-context-files --no-mcp --system-prompt 'You are a helpful assistant.' --append-system-prompt {appended} --no-session -p",
                 )
 
     def test_full_without_subagents_runs_hax(self) -> None:
@@ -138,7 +146,7 @@ class TranslationTests(FakeHomeTestCase):
         """Run a lean request for a GPT model on pi, hax taking no shell-only tool list."""
         self.assert_launch(
             "--preset lean --model gpt-6.1-sol --effort low --json -- PROMPT",
-            argv="pi --model openai-codex/gpt-6.1-sol:low --tools bash --no-skills --no-mcp --mode json -p",
+            argv="pi --model openai-codex/gpt-6.1-sol:low --tools bash --no-extensions --no-skills --no-mcp --mode json -p",
         )
 
     def test_session_id_runs_pi(self) -> None:
@@ -201,6 +209,7 @@ class TranslationTests(FakeHomeTestCase):
                 "openai-codex/gpt-6-astra:xhigh",
                 "--tools",
                 "read,grep,find,ls",
+                "--no-extensions",
                 "--no-skills",
                 "--skill",
                 str(self.home / ".agents/skills/review-correctness"),
@@ -245,8 +254,8 @@ class TranslationTests(FakeHomeTestCase):
                 )
 
     def test_skill_missing_from_hax_runs_pi(self) -> None:
-        """Run on pi a GPT request invoking a skill only pi finds."""
-        skill = self.home / ".pi/agent/skills/pi-skill"
+        """Run on pi a GPT request invoking a skill only pi finds, by its path in the view of pi's sandbox."""
+        skill = self.pi_dir / "agent/skills/pi-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# pi-skill\n")
         self.assert_launch(
@@ -256,7 +265,7 @@ class TranslationTests(FakeHomeTestCase):
                 "--model",
                 "openai-codex/gpt-6-luna",
                 "--skill",
-                str(skill),
+                "~/.pi/agent/skills/pi-skill",
                 "--no-mcp",
                 "-p",
             ],
@@ -341,7 +350,7 @@ class TranslationTests(FakeHomeTestCase):
         self.assertEqual(
             launch("--preset read-only --tools +web --model gpt-6.1-sol").argv,
             shlex.split(
-                "pi --model openai-codex/gpt-6.1-sol --tools read,grep,find,ls,web_search,fetch_content,get_search_content,source_check --no-skills --no-mcp -p"
+                "pi --model openai-codex/gpt-6.1-sol --tools read,grep,find,ls,web_search,fetch_content,get_search_content,source_check --no-extensions -e ~/.pi/agent/npm/node_modules/pi-web-access --no-skills --no-mcp -p"
             ),
         )
 
@@ -362,7 +371,7 @@ class TranslationTests(FakeHomeTestCase):
             ),
             (
                 "--preset read-only --tools -read --model gpt-6.1-sol",
-                "pi --model openai-codex/gpt-6.1-sol --tools grep,find,ls --no-skills --no-mcp -p",
+                "pi --model openai-codex/gpt-6.1-sol --tools grep,find,ls --no-extensions --no-skills --no-mcp -p",
             ),
         ):
             with self.subTest(command=command):
@@ -370,15 +379,12 @@ class TranslationTests(FakeHomeTestCase):
 
     def test_pi_web_needs_package(self) -> None:
         """Refuse web tools on pi when its settings do not install the package providing them."""
-        settings = self.home / ".pi/agent/settings.json"
-        settings.unlink()
-        with self.assertRaises(SystemExit) as raised:
-            launch("--preset read-only --tools +web --model gpt-6.1-sol")
-        self.assertEqual(
-            str(raised.exception),
+        (self.pi_dir / "agent/settings.json").unlink()
+        self.assert_refusal(
+            "--preset read-only --tools +web --model gpt-6.1-sol",
             "No harness can satisfy the request:\n"
             "  hax: takes no tool list but shell,read,write,edit, with or without subagent\n"
-            f"  pi: has no web tool without the npm:pi-web-access package in {settings}",
+            "  pi: has no web tool without the pi-web-access extension",
         )
 
     def test_pi_lacking_tool(self) -> None:
@@ -387,10 +393,8 @@ class TranslationTests(FakeHomeTestCase):
             launch("--harness pi --model gpt-6.1-sol --tools -subagent").argv,
             shlex.split("pi --model openai-codex/gpt-6.1-sol --no-mcp -p"),
         )
-        with self.assertRaises(SystemExit) as raised:
-            launch("--harness pi --model gpt-6.1-sol --tools +subagent")
-        self.assertEqual(
-            str(raised.exception),
+        self.assert_refusal(
+            "--harness pi --model gpt-6.1-sol --tools +subagent",
             "No harness can satisfy the request:\n  pi: has no subagent tool",
         )
 
@@ -413,7 +417,7 @@ class TranslationTests(FakeHomeTestCase):
 
     def test_optional_selections(self) -> None:
         """Launch optional names a harness has as additions, and the others as omitted."""
-        skill = self.home / ".pi/agent/skills/pi-only"
+        skill = self.pi_dir / "agent/skills/pi-only"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# pi-only\n")
         for optional, equivalent in (
@@ -462,7 +466,9 @@ class TranslationTests(FakeHomeTestCase):
 
     def test_optional_pi_web_needs_package(self) -> None:
         """Ignore optional web tools on pi when its settings do not install the package providing them."""
-        settings = self.home / ".pi/agent/settings.json"
+        settings = self.pi_dir / "agent/settings.json"
+        for package in ("unrelated", "pi-web-access-extra"):
+            (self.pi_dir / "agent/npm/node_modules" / package).mkdir()
         for content in (
             None,
             {},
@@ -481,7 +487,7 @@ class TranslationTests(FakeHomeTestCase):
 
     def test_pi_web_package_settings(self) -> None:
         """Find the package providing pi's web tools in a pinned or object declaration, and in settings starting with a byte order mark."""
-        settings = self.home / ".pi/agent/settings.json"
+        settings = self.pi_dir / "agent/settings.json"
         for content in (
             json.dumps({"packages": ["npm:pi-web-access@0.37.0"]}),
             json.dumps({"packages": [{"source": "npm:pi-web-access"}]}),
@@ -493,6 +499,239 @@ class TranslationTests(FakeHomeTestCase):
                     launch("--preset read-only --tools ?web --model gpt-6.1-sol"),
                     launch("--preset read-only --tools +web --model gpt-6.1-sol"),
                 )
+
+    def test_pi_scoped_npm_package(self) -> None:
+        """Name a pi npm package by its scope and name, whether pinned or not."""
+        (self.pi_dir / "agent/npm/node_modules/@scope/probe").mkdir(parents=True)
+        for source in ("npm:@scope/probe", "npm:@scope/probe@1.2.3"):
+            with self.subTest(source=source):
+                (self.pi_dir / "agent/settings.json").write_text(
+                    json.dumps({"packages": [source]})
+                )
+                self.assertEqual(
+                    launch(
+                        "--harness pi --model gpt-6.1-sol --extensions +@scope/probe"
+                    ).argv,
+                    shlex.split(
+                        "pi --model openai-codex/gpt-6.1-sol -e ~/.pi/agent/npm/node_modules/@scope/probe --no-mcp -p"
+                    ),
+                )
+
+    def test_pi_extension_selection(self) -> None:
+        """Load pi extensions by path in pi's view, on top of those pi loads or alone, mcp following the MCP option."""
+        extensions = self.pi_dir / "agent/extensions"
+        (extensions / "tools").mkdir(parents=True)
+        (extensions / "tools/index.ts").write_text("")
+        (extensions / "empty").mkdir()
+        for name in ("handoff.ts", "notes.md", ".hidden.ts"):
+            (extensions / name).write_text("")
+        web = "~/.pi/agent/npm/node_modules/pi-web-access"
+        for options, args in (
+            ("--extensions +handoff", "-e ~/.pi/agent/extensions/handoff.ts --no-mcp"),
+            (
+                "--extensions -handoff",
+                f"--no-extensions -e builtin:codemode -e builtin:llama.cpp -e {web} -e builtin:tool-search -e ~/.pi/agent/extensions/tools --no-mcp",
+            ),
+            (
+                "--preset lean --extensions +tools --mcp",
+                "--tools bash --no-extensions -e ~/.pi/agent/extensions/tools -e builtin:mcp --no-skills",
+            ),
+            ("--no-extensions", "--no-extensions --no-mcp"),
+            (
+                "--extensions ?handoff,?missing",
+                "-e ~/.pi/agent/extensions/handoff.ts --no-mcp",
+            ),
+        ):
+            with self.subTest(options=options):
+                self.assertEqual(
+                    launch(f"--harness pi --model gpt-6.1-sol {options}").argv,
+                    shlex.split(f"pi --model openai-codex/gpt-6.1-sol {args} -p"),
+                )
+
+    def test_pi_web_tools_load_their_extension(self) -> None:
+        """Load the extension providing pi's web tools along with them, even when extensions are off or it is removed."""
+        web = "-e ~/.pi/agent/npm/node_modules/pi-web-access"
+        for options, args in (
+            (
+                "--preset lean --tools +web",
+                f"--tools bash,web_search,fetch_content,get_search_content,source_check --no-extensions {web} --no-skills",
+            ),
+            (
+                "--tools +web --extensions -pi-web-access",
+                f"--tools +web_search,+fetch_content,+get_search_content,+source_check {web}",
+            ),
+        ):
+            with self.subTest(options=options):
+                self.assertEqual(
+                    launch(f"--harness pi --model gpt-6.1-sol {options}").argv,
+                    shlex.split(
+                        f"pi --model openai-codex/gpt-6.1-sol {args} --no-mcp -p"
+                    ),
+                )
+
+    def test_harness_dir_follows_sandbox_mount(self) -> None:
+        """Locate a harness's directory where this process sees it, inside a sandbox or not."""
+        xdg_config_home = self.home / "xdg"
+        for harness in (agent_worker.Harness.CLAUDE, agent_worker.Harness.PI):
+            for environ, sandbox_dir, directory in (
+                ({}, self.sandbox_dir, self.home / ".config" / harness),
+                (
+                    {"XDG_CONFIG_HOME": str(xdg_config_home)},
+                    self.sandbox_dir,
+                    xdg_config_home / harness,
+                ),
+                (
+                    {"XDG_CONFIG_HOME": str(xdg_config_home)},
+                    self.home,
+                    self.home / f".{harness}",
+                ),
+            ):
+                with (
+                    self.subTest(directory=directory),
+                    unittest.mock.patch.dict(os.environ, environ),
+                    unittest.mock.patch.object(
+                        agent_worker, "SANDBOX_DIR", sandbox_dir
+                    ),
+                ):
+                    self.assertEqual(agent_worker.harness_dir(harness), directory)
+
+    def test_pi_extension_selection_refused(self) -> None:
+        """Refuse selecting pi extensions it lacks, or alongside settings it cannot follow."""
+        for settings, selection, refusal in (
+            (PI_SETTINGS, "+missing", "has no extension missing"),
+            (PI_SETTINGS, "+missing,-codemode", "has no extension missing"),
+            (
+                {"extensions": ["-builtin:llama.cpp"]},
+                "+missing",
+                "cannot select extensions alongside its extensions setting",
+            ),
+            (
+                {"packages": [{"source": "npm:pi-web-access", "extensions": []}]},
+                "+missing",
+                "cannot select extensions alongside the filtered package npm:pi-web-access",
+            ),
+            (
+                {"packages": ["git:github.com/user/repo"]},
+                "+missing",
+                "cannot select extensions alongside the non-npm package git:github.com/user/repo",
+            ),
+            (
+                {"packages": ["npm:absent"]},
+                "+missing",
+                "cannot select extensions alongside the package npm:absent, missing from its npm directory",
+            ),
+        ):
+            with self.subTest(settings=settings, selection=selection):
+                (self.pi_dir / "agent/settings.json").write_text(json.dumps(settings))
+                self.assert_refusal(
+                    f"--harness pi --model gpt-6.1-sol --extensions {selection}",
+                    f"No harness can satisfy the request:\n  pi: {refusal}",
+                )
+
+    def test_pi_extension_layout_refused(self) -> None:
+        """Refuse selecting pi extensions in a layout it cannot follow."""
+        bundle = {"pi": {"extensions": ["index.js"], "skills": ["skills"]}}
+        for index, (files, refusal) in enumerate(
+            (
+                (
+                    {"extensions/.gitignore": "*.js\n"},
+                    "cannot select extensions alongside the .gitignore of its extensions directory",
+                ),
+                (
+                    {"extensions/index.ts": ""},
+                    "cannot select extensions alongside the index.ts of its extensions directory",
+                ),
+                (
+                    {"extensions/probe.js": "", "extensions/probe/index.js": ""},
+                    "has two extensions named probe",
+                ),
+                (
+                    {"extensions/pi-web-access.ts": ""},
+                    "has two extensions named pi-web-access",
+                ),
+                (
+                    {"extensions/bundle/package.json": json.dumps(bundle)},
+                    "cannot select extensions alongside the extension bundle carrying skills",
+                ),
+                (
+                    {"npm/node_modules/pi-web-access/skills/web/SKILL.md": ""},
+                    "cannot select extensions alongside the extension pi-web-access carrying skills",
+                ),
+            )
+        ):
+            config_home = self.home / f"config-{index}"
+            for path, content in {
+                "settings.json": json.dumps(PI_SETTINGS),
+                "npm/node_modules/pi-web-access/package.json": "{}",
+                **files,
+            }.items():
+                (config_home / "pi/agent" / path).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                (config_home / "pi/agent" / path).write_text(content)
+            with (
+                self.subTest(refusal=refusal),
+                unittest.mock.patch.dict(
+                    os.environ, {"XDG_CONFIG_HOME": str(config_home)}
+                ),
+            ):
+                self.assert_refusal(
+                    "--harness pi --model gpt-6.1-sol --extensions -codemode",
+                    f"No harness can satisfy the request:\n  pi: {refusal}",
+                )
+
+    def test_pi_extension_settings_unread_without_selection(self) -> None:
+        """Launch pi alongside extension settings it cannot follow when the request mentions no extension and asks for no web tool."""
+        (self.pi_dir / "agent/settings.json").write_text(
+            json.dumps({"extensions": ["-builtin:llama.cpp"]})
+        )
+        for options in ("", "--no-extensions", "--tools -web"):
+            with self.subTest(options=options):
+                self.assertEqual(
+                    launch(f"--harness pi --model gpt-6.1-sol {options}").argv[0], "pi"
+                )
+
+    def test_hax_has_no_extensions(self) -> None:
+        """Run on pi a GPT request adding or listing extensions, hax having none, and on hax one turning them off, removing or optionally adding one."""
+        (self.pi_dir / "agent/extensions").mkdir()
+        (self.pi_dir / "agent/extensions/handoff.ts").write_text("")
+        for options, harness in (
+            ("--extensions +handoff", "pi"),
+            ("--extensions handoff", "pi"),
+            ("--extensions ?handoff", "hax"),
+            ("--extensions -handoff", "hax"),
+            ("--no-extensions", "hax"),
+        ):
+            with self.subTest(options=options):
+                self.assertEqual(
+                    launch(f"--model gpt-6-luna {options}").argv[0], harness
+                )
+
+    def test_claude_plugin_selection(self) -> None:
+        """Turn claude plugins on and off through its settings, every installed one when given a list, and refuse one not installed."""
+        registry = self.home / ".config/claude/plugins/installed_plugins.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(
+            json.dumps({"version": 2, "plugins": {"probe@mp": [], "other@mp": []}})
+        )
+        for options, enabled in (
+            ("--extensions +probe@mp", {"probe@mp": True}),
+            ("--extensions +probe@mp,-other@mp", {"probe@mp": True, "other@mp": False}),
+            (
+                "--preset lean --extensions ?probe@mp,?missing@mp",
+                {"probe@mp": True, "other@mp": False},
+            ),
+            ("--preset lean", {"probe@mp": False, "other@mp": False}),
+        ):
+            with self.subTest(options=options):
+                argv = launch(f"--model opus {options}").argv
+                settings = json.loads(argv[argv.index("--settings") + 1])
+                self.assertEqual(settings["enabledPlugins"], enabled)
+        self.assertNotIn("--settings", launch("--model opus").argv)
+        self.assert_refusal(
+            "--model opus --extensions +missing@mp",
+            "No harness can satisfy the request:\n  claude: has no plugin missing@mp",
+        )
 
     def test_fallback_skill_dir(self) -> None:
         """Look a skill up in the shared skill directory when no harness directory has it."""
@@ -507,6 +746,7 @@ class TranslationTests(FakeHomeTestCase):
                 "openai-codex/gpt-6.1-sol",
                 "--tools",
                 "bash",
+                "--no-extensions",
                 "--no-skills",
                 "--skill",
                 str(skill),
@@ -564,13 +804,11 @@ class TranslationTests(FakeHomeTestCase):
                 launch("--model opus --auth pro").env,
                 {"SANDBOX_AGENT_CLAUDE_AUTH": "pro"},
             )
-            with self.assertRaises(SystemExit) as raised:
-                launch("--model opus --auth work")
-        self.assertEqual(
-            str(raised.exception),
-            "No harness can satisfy the request:\n"
-            "  claude: cannot switch from the auth profile its sandbox mounted, pro",
-        )
+            self.assert_refusal(
+                "--model opus --auth work",
+                "No harness can satisfy the request:\n"
+                "  claude: cannot switch from the auth profile its sandbox mounted, pro",
+            )
 
     def test_prompt_file_read_once(self) -> None:
         """Read a system prompt file once, a pipe giving its content only once."""
@@ -584,9 +822,13 @@ class TranslationTests(FakeHomeTestCase):
         self.assertEqual(request.system_prompt, "SYSTEM")
 
     def test_malformed_selection_rejected(self) -> None:
-        """Reject malformed tool and skill selections."""
+        """Reject malformed selections."""
         for option, message in (
             ("--skills --no-tools", "argument --skills: expected one argument"),
+            (
+                "--extensions --no-tools",
+                "argument --extensions: expected one argument",
+            ),
             ("--skills ''", "Empty name in --skills"),
             (
                 "--skills review-correctness,+other",
@@ -644,26 +886,21 @@ class TranslationTests(FakeHomeTestCase):
 
     def test_unknown_model_rejected(self) -> None:
         """Refuse a model of no known family."""
-        with self.assertRaises(SystemExit) as raised:
-            launch("--model unsupported-model")
-        self.assertEqual(
-            str(raised.exception), "Unknown model family: unsupported-model"
+        self.assert_refusal(
+            "--model unsupported-model", "Unknown model family: unsupported-model"
         )
 
     def test_incompatible_harness_refused(self) -> None:
         """Refuse a forced harness that does not run the model."""
-        with self.assertRaises(SystemExit) as raised:
-            launch("--model gpt-6-luna --harness claude")
-        self.assertEqual(
-            str(raised.exception), "Harness claude does not run gpt-6-luna"
+        self.assert_refusal(
+            "--model gpt-6-luna --harness claude",
+            "Harness claude does not run gpt-6-luna",
         )
 
     def test_unsatisfiable_request_names_every_refusal(self) -> None:
         """Fail with each candidate harness's reason when none can satisfy the request."""
-        with self.assertRaises(SystemExit) as raised:
-            launch("--preset lean --max-turns 3 --model gpt-6.1-sol")
-        self.assertEqual(
-            str(raised.exception),
+        self.assert_refusal(
+            "--preset lean --max-turns 3 --model gpt-6.1-sol",
             "No harness can satisfy the request:\n"
             "  hax: takes no tool list but shell,read,write,edit, with or without subagent\n"
             "  pi: has no turn cap",

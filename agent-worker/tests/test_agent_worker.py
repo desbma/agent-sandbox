@@ -585,12 +585,17 @@ class ProcessTests(FakeHomeTestCase):
         self.env = os.environ | {"PATH": f"{self.bin_dir}:{os.defpath}"}
 
     def run_worker(
-        self, command: str, env: dict[str, str] | None = None, stdin: str = ""
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        stdin: str = "",
+        stdin_fd: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run the launcher to completion."""
         return subprocess.run(
             [sys.executable, str(SCRIPT_PATH), *shlex.split(command)],
-            input=stdin,
+            input=None if stdin_fd is not None else stdin,
+            stdin=stdin_fd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=self.env | (env or {}),
@@ -633,6 +638,29 @@ class ProcessTests(FakeHomeTestCase):
                 "",
             ),
         )
+
+    def test_dry_run_prints_command(self) -> None:
+        """Print the harness command line, its variables first and its values quoted, instead of running it, and without waiting for a prompt."""
+        (self.bin_dir / "hax").write_text("#!/bin/sh\necho ran\n")
+        read_end, write_end = os.pipe()
+        self.addCleanup(os.close, read_end)
+        self.addCleanup(os.close, write_end)
+        for command, expected in (
+            (
+                "--model gpt-6-luna --tools -subagent --system-prompt 'be brief'",
+                "HAX_NO_SUBAGENTS=1 HAX_SYSTEM_PROMPT='be brief' hax --provider=codex --model=gpt-6-luna -p\n",
+            ),
+            (
+                "--model haiku --no-system-prompt",
+                "claude --model haiku --strict-mcp-config --system-prompt '' --permission-mode bypassPermissions -p\n",
+            ),
+        ):
+            with self.subTest(command=command):
+                result = self.run_worker(f"-d {command}", stdin_fd=read_end)
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (0, expected, ""),
+                )
 
     def test_shell_overlap_warned(self) -> None:
         """Warn about the requested tools the shell already covers."""

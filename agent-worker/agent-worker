@@ -8,6 +8,7 @@ import dataclasses
 import enum
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -173,6 +174,7 @@ class Request:
     session: bool
     events: bool
     auth: str | None
+    dry_run: bool
     prompt: list[str]
 
 
@@ -344,6 +346,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--auth", metavar="PROFILE", help="Sandbox auth profile of the harness"
+    )
+    parser.add_argument(
+        "-d",
+        "--dry-run",
+        action="store_true",
+        help="Print the harness command line instead of running it",
     )
     parser.add_argument("prompt", nargs="*", help="Prompt, read from stdin when absent")
     return parser
@@ -805,15 +813,24 @@ def run_child(launch: Launch, stdin: IO[bytes]) -> NoReturn:
 
 
 def main() -> None:
-    """Start the harness a command line translates into."""
+    """Start the harness a command line translates into, or print its command line."""
     request = parse_request(sys.argv[1:])
-    prompt = " ".join(request.prompt) if request.prompt else sys.stdin.read()
+    if request.prompt or request.dry_run:
+        prompt = " ".join(request.prompt)
+    else:
+        prompt = sys.stdin.read()
     launch = select_launch(request, prompt)
     if overlap := shell_overlap(request.tools):
         print(
             f"Warning: the shell already covers {', '.join(overlap)}, and models are better trained to do it through the shell",
             file=sys.stderr,
         )
+    if request.dry_run:
+        variables = [
+            f"{name}={shlex.quote(value)}" for name, value in launch.env.items()
+        ]
+        print(*variables, shlex.join(launch.argv))
+        return
     with tempfile.TemporaryFile() as stdin:
         stdin.write(launch.stdin.encode())
         stdin.seek(0)

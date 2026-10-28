@@ -889,6 +889,9 @@ MOUNTS: list[Mount] = [
     Mount(Path("/etc/terminfo"), MountKind.BIND_RO),
     # other
     Mount(XDG_CONFIG_HOME / "agents", MountKind.BIND_RO, HOME / ".config/agents"),
+    Mount(
+        XDG_CONFIG_HOME / "git/ignore", MountKind.BIND_RO, HOME / ".config/git/ignore"
+    ),
     Mount(XDG_CONFIG_HOME / "helix", MountKind.BIND_RO, HOME / ".config/helix"),
     # workaround https://github.com/jj-vcs/jj/issues/9579
     Mount(XDG_CONFIG_HOME / "jj/repos", MountKind.BIND_RO, HOME / ".config/jj/repos"),

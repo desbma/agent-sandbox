@@ -405,6 +405,23 @@ class FilesystemTests(SandboxTestCase):
         self.assertEqual(report["git_write"], "EROFS")
         self.assertEqual(report["project_write"], "ok")
 
+    def test_git_ignore_is_read_only(self) -> None:
+        """Expose the host's global git ignore file read-only at its default path."""
+        (self.fixture.config_home / "git").mkdir()
+        (self.fixture.config_home / "git/ignore").write_text("*.swp\n")
+        ignore = self.fixture.home / ".config/git/ignore"
+
+        report = self.run_probe(
+            [
+                Op("ignore", OpKind.READ, ignore),
+                Op("ignore_write", OpKind.WRITE, ignore),
+            ],
+            agent="claude",
+        )
+
+        self.assertEqual(report["ignore"], "*.swp\n")
+        self.assertEqual(report["ignore_write"], "EROFS")
+
     def test_overlayfs_discards_writes(self) -> None:
         """Inherit overlay source content but keep writes out of the host."""
         cargo_home = self.fixture.root / "cargo"

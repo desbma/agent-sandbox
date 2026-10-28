@@ -27,6 +27,8 @@ This is made from 4 parts:
 - [`agent-microvm`](#agent-microvm): a [skill](https://agentskills.io/) the agent can use to spawn a throwaway microVM and run privileged commands in it, completely isolated from the host.
 - [`agent-worker`](#agent-worker): a launcher starting a coding agent non-interactively, with restricted tools, skills and instructions, for multi-agent workflows.
 
+[![The four components](docs/components.svg)](docs/components.svg)
+
 The sandbox and microVM scripts were preceded by experiments with different container ([Firejail](https://github.com/netblue30/firejail), [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)) and VMM ([CrosVM](https://github.com/google/crosvm), [cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Firecracker](https://firecracker-microvm.github.io/), [systemd-vmspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-vmspawn.html)) solutions, and were then refined during months of daily use.
 
 ## `sandbox-coding-agent`

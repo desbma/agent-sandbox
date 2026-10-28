@@ -1,0 +1,109 @@
+// Overview of the repository's four components, around the coding agent they serve.
+// Positions are pinned in points, y pointing up.
+digraph components {
+  graph [layout=neato, inputscale=72, splines=line, pad=0.2, fontname="DejaVu Sans,sans-serif", labeljust=l]
+  node [shape=box, style=rounded, fontname="DejaVu Sans,sans-serif", width=0, height=0.5]
+  edge [fontname="DejaVu Sans,sans-serif"]
+
+  // user, drawn as a stick figure
+  node [shape=point, width=0, label=""]
+  edge [dir=none, penwidth=1.5]
+  user_head [shape=circle, width=0.33, height=0.33, pos="-90,335!"]
+  user_shoulders [pos="-90,318!"]
+  user_hip [pos="-90,294!"]
+  user_left_hand [pos="-105,302!"]
+  user_right_hand [pos="-75,302!"]
+  user_left_foot [pos="-102,270!"]
+  user_right_foot [pos="-78,270!"]
+  user_head -> user_shoulders [tailport=s]
+  user_shoulders -> user_hip
+  user_shoulders -> user_left_hand
+  user_shoulders -> user_right_hand
+  user_hip -> user_left_foot
+  user_hip -> user_right_foot
+  user_label [shape=plaintext, label="user", pos="-90,255!"]
+  user [style=invis, pos="-66,300!"]
+  edge [dir=forward, penwidth=1]
+
+  // frame corners and edge end points, invisible
+  node [shape=point, style=invis, width=0, label=""]
+
+  subgraph cluster_host {
+    label="host"
+    style=rounded
+    color=gray50
+    fontcolor=gray40
+    host_sw [pos="18,64!"]
+    host_ne [pos="1014,480!"]
+
+    pasta [shape=box, style=rounded, height=0.5, width=1.25, label="pasta", pos="700,300!"]
+    proxy [shape=box, style="rounded,dashed", height=0.7, width=2.6, pos="904,300!",
+      label=<<font face="DejaVu Sans Mono,monospace"><b>agent-proxy</b></font><br/>systemd user service>]
+  }
+
+  subgraph cluster_sandbox {
+    label=<<font face="DejaVu Sans Mono,monospace"><b>sandbox-coding-agent&#160;</b></font>(bwrap)>
+    style=rounded
+    penwidth=1.5
+    sandbox_sw [pos="34,80!"]
+    sandbox_ne [pos="616,444!"]
+    // where sandbox traffic leaves, on the frame's right side
+    sandbox_exit [pos="616,300!"]
+
+    agent [shape=box, style="rounded,filled", penwidth=2.5, fillcolor="#e3ecfa", width=3.75, height=1.4,
+      pos="200,300!",
+      label=<<font point-size="18"><b>coding agent</b></font><br/><br/>amp / claude / codex / hax / pi>]
+
+    node [shape=box, style=rounded, width=2.1, height=0.65]
+    worker_claude [pos="525,385!", label=<<font face="DejaVu Sans Mono,monospace"><b>agent-worker</b></font><br/>claude>]
+    worker_hax [pos="525,300!", label=<<font face="DejaVu Sans Mono,monospace"><b>agent-worker</b></font><br/>hax>]
+    worker_pi [pos="525,215!", label=<<font face="DejaVu Sans Mono,monospace"><b>agent-worker</b></font><br/>pi>]
+  }
+
+  subgraph cluster_microvm {
+    label=<<font face="DejaVu Sans Mono,monospace"><b>agent-microvm&#160;</b></font>(QEMU, Alpine Linux)>
+    // title at the bottom, clear of the arrow entering from the top
+    labelloc=b
+    style=rounded
+    penwidth=3.5
+    microvm_sw [pos="50,96!"]
+    microvm_ne [pos="350,184!"]
+
+    privileged [shape=box, style=rounded, width=3.3, label="privileged commands (as root)", pos="200,150!"]
+  }
+
+  subgraph cluster_internet {
+    label="internet"
+    style=rounded
+    color=gray50
+    fontcolor=gray40
+    internet_sw [pos="1102,184!"]
+    internet_ne [pos="1264,354!"]
+
+    github [shape=box, style=rounded, width=1.8, label="GitHub API", pos="1183,300!"]
+  }
+
+  // ends of the arrows reaching a frame, on the outer edge of its line
+  microvm_entry [pos="200,185.75!"]
+  internet_from_proxy [pos="1101.5,240!"]
+  internet_from_pasta [pos="1101.5,200!"]
+
+  // elbows of the arrows reaching the internet frame
+  proxy_elbow [pos="904,240!"]
+  pasta_elbow [pos="700,200!"]
+
+  // labels placed beside their arrows, at an angle and distance from the tail
+  user -> agent [headport=w, taillabel="runs", labeldistance=4.43, labelangle=18.4]
+  agent -> worker_claude [tailport=e, headport=w]
+  agent -> worker_hax [tailport=e, headport=w, taillabel="spawns", labeldistance=8.14, labelangle=10.6]
+  agent -> worker_pi [tailport=e, headport=w]
+  agent -> microvm_entry [tailport=s, taillabel="skill", labeldistance=4.65, labelangle=28.2]
+
+  sandbox_exit -> pasta
+  pasta -> proxy [taillabel="HTTPS", labeldistance=3.46, labelangle=20.3]
+  proxy -> github [taillabel="+ gh token", labeldistance=6.17, labelangle=11.2]
+  proxy -> proxy_elbow [tailport=s, dir=none]
+  proxy_elbow -> internet_from_proxy
+  pasta -> pasta_elbow [tailport=s, dir=none]
+  pasta_elbow -> internet_from_pasta [taillabel="other traffic", labeldistance=15.05, labelangle=4.6]
+}

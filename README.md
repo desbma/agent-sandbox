@@ -160,7 +160,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
 ### Features
 
 - Starts [Claude Code](https://claude.com/product/claude-code), [hax](https://usehax.dev/) or [Pi](https://pi.dev/) non-interactively: no permission prompt, prompt from the arguments or stdin, final answer or JSON event stream on stdout
-- One command line for all three harnesses, abstracting away most of their differences, and simpler than any of theirs: presets (`full`, `lean`, `read-only`, `bare`) adjusted by arguments for tools, skills, extensions, instruction files, memory, git context, MCP and system prompt
+- One command line for all three harnesses, abstracting away most of their differences, and simpler than any of theirs: presets (`full`, `standard`, `read-only`, `lean`, `bare`) adjusted by arguments for tools, skills, extensions, instruction files, memory, git context, MCP and system prompt
 - Picks the harness from the model and the constraints: Anthropic models go to Claude Code, GPT models to hax, or to Pi when hax can not satisfy the request
 - Shows hax's stderr, written on every run, only when it fails
 

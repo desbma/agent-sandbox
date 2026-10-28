@@ -39,16 +39,17 @@ RESTRICTED_PRESET_ARGS = (
     "--no-git-context",
     "--no-mcp",
 )
+MINIMAL_PRESET_ARGS = (
+    "--no-instruction-files",
+    "--no-system-prompt",
+    *RESTRICTED_PRESET_ARGS,
+)
 PRESETS = {
     "full": ("--no-mcp",),
-    "lean": ("--tools", "shell", *RESTRICTED_PRESET_ARGS),
+    "standard": ("--tools", "shell,read,write,edit", *RESTRICTED_PRESET_ARGS),
     "read-only": ("--tools", "read,grep,find", *RESTRICTED_PRESET_ARGS),
-    "bare": (
-        "--no-tools",
-        "--no-instruction-files",
-        "--no-system-prompt",
-        *RESTRICTED_PRESET_ARGS,
-    ),
+    "lean": ("--tools", "shell", *MINIMAL_PRESET_ARGS),
+    "bare": ("--no-tools", *MINIMAL_PRESET_ARGS),
 }
 # tool names, and the names of the harnesses taking a tool list, for those having the tool
 TOOLS = {
@@ -69,7 +70,6 @@ TOOLS = {
     },
     "subagent": {Harness.CLAUDE: ("Agent",)},
 }
-SHELL_COVERED_TOOLS = frozenset({"find", "grep", "read", "write"})
 # tools claude enables when given no tool list, Skill aside
 CLAUDE_OWN_TOOLS = (
     "Agent",
@@ -972,16 +972,6 @@ def select_launch(request: Request, prompt: str) -> Launch:
     raise SystemExit("\n".join(["No harness can satisfy the request:", *refusals]))
 
 
-def shell_overlap(tools: Selection) -> list[str]:
-    """List the named tools the shell covers, when the shell is enabled alongside them."""
-    if tools.names is None:
-        named, shell = tools.added | tools.optional, "shell" not in tools.removed
-    else:
-        named = tools.names | tools.optional
-        shell = "shell" in named
-    return sorted(named & SHELL_COVERED_TOOLS) if shell else []
-
-
 def die_with_parent() -> None:
     """Have the calling process receive SIGKILL when its parent dies."""
     if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL):
@@ -1027,11 +1017,6 @@ def main() -> None:
     else:
         prompt = sys.stdin.read()
     launch = select_launch(request, prompt)
-    if overlap := shell_overlap(request.tools):
-        print(
-            f"Warning: the shell already covers {', '.join(overlap)}, and models are better trained to do it through the shell",
-            file=sys.stderr,
-        )
     if request.dry_run:
         variables = [
             f"{name}={shlex.quote(value)}" for name, value in launch.env.items()

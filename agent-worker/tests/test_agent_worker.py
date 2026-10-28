@@ -146,7 +146,22 @@ class TranslationTests(FakeHomeTestCase):
         """Run a lean request for a GPT model on pi, hax taking no shell-only tool list."""
         self.assert_launch(
             "--preset lean --model gpt-6.1-sol --effort low --json -- PROMPT",
-            argv="pi --model openai-codex/gpt-6.1-sol:low --tools bash --no-extensions --no-skills --no-mcp --mode json -p",
+            argv="pi --model openai-codex/gpt-6.1-sol:low --tools bash --no-extensions --no-skills --no-context-files --no-mcp --system-prompt 'You are a helpful assistant.' --append-system-prompt '' --mode json -p",
+        )
+
+    def test_standard_gpt_runs_hax(self) -> None:
+        """Run a standard request for a GPT model on hax."""
+        self.assert_launch(
+            "--preset standard --model gpt-6.1-sol --effort low -- PROMPT",
+            argv="hax --provider=codex --model=gpt-6.1-sol --effort=low -p",
+            env={"HAX_NO_TASKS": "1", "HAX_NO_SUBAGENTS": "1", "HAX_NO_SKILLS": "1"},
+        )
+
+    def test_standard_claude(self) -> None:
+        """Give claude the shell and file tools, keeping its system prompt and instruction files."""
+        self.assert_launch(
+            "--preset standard --model opus -- PROMPT",
+            argv="""claude --model opus --tools Bash,Read,Write,Edit --disable-slash-commands --strict-mcp-config --settings '{"autoMemoryEnabled": false, "includeGitInstructions": false}' --permission-mode bypassPermissions -p""",
         )
 
     def test_session_id_runs_pi(self) -> None:
@@ -533,8 +548,8 @@ class TranslationTests(FakeHomeTestCase):
                 f"--no-extensions -e builtin:codemode -e builtin:llama.cpp -e {web} -e builtin:tool-search -e ~/.pi/agent/extensions/tools --no-mcp",
             ),
             (
-                "--preset lean --extensions +tools --mcp",
-                "--tools bash --no-extensions -e ~/.pi/agent/extensions/tools -e builtin:mcp --no-skills",
+                "--preset standard --extensions +tools --mcp",
+                "--tools bash,read,write,edit --no-extensions -e ~/.pi/agent/extensions/tools -e builtin:mcp --no-skills",
             ),
             ("--no-extensions", "--no-extensions --no-mcp"),
             (
@@ -553,8 +568,8 @@ class TranslationTests(FakeHomeTestCase):
         web = "-e ~/.pi/agent/npm/node_modules/pi-web-access"
         for options, args in (
             (
-                "--preset lean --tools +web",
-                f"--tools bash,web_search,fetch_content,get_search_content,source_check --no-extensions {web} --no-skills",
+                "--preset standard --tools +web",
+                f"--tools bash,read,write,edit,web_search,fetch_content,get_search_content,source_check --no-extensions {web} --no-skills",
             ),
             (
                 "--tools +web --extensions -pi-web-access",
@@ -739,13 +754,15 @@ class TranslationTests(FakeHomeTestCase):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# fallback-skill\n")
         self.assertEqual(
-            launch("--preset lean --skills fallback-skill --model gpt-6.1-sol").argv,
+            launch(
+                "--preset standard --skills fallback-skill --model gpt-6.1-sol"
+            ).argv,
             [
                 "pi",
                 "--model",
                 "openai-codex/gpt-6.1-sol",
                 "--tools",
-                "bash",
+                "bash,read,write,edit",
                 "--no-extensions",
                 "--no-skills",
                 "--skill",
@@ -998,21 +1015,11 @@ class ProcessTests(FakeHomeTestCase):
                     (0, expected, ""),
                 )
 
-    def test_shell_overlap_warned(self) -> None:
-        """Warn about the requested tools the shell already covers, the shell or the tools being optional."""
-        for command, covered in (
-            ("--model opus --preset lean --tools +read,+edit,?grep", "grep, read"),
-            ("--model opus --tools read --tools ?shell", "read"),
-        ):
-            with self.subTest(command=command):
-                result = self.run_worker(command)
-                self.assertEqual(
-                    (result.returncode, result.stderr),
-                    (
-                        0,
-                        f"Warning: the shell already covers {covered}, and models are better trained to do it through the shell\n",
-                    ),
-                )
+    def test_help_preset_order(self) -> None:
+        """List the presets in the help as full, standard, read-only, lean, bare."""
+        result = self.run_worker("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--preset {full,standard,read-only,lean,bare}", result.stdout)
 
     def test_hax_stderr_shown_only_on_failure(self) -> None:
         """Hide hax's stderr when it succeeds, and show it with its exit status when it fails."""

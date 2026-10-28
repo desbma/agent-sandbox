@@ -16,7 +16,7 @@ import sys
 import tempfile
 import textwrap
 import uuid
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Container, Iterable, Sequence
 from pathlib import Path
 from typing import IO, NoReturn, Self
 
@@ -108,6 +108,9 @@ HAX_LAUNCH_VARIABLES = frozenset(
 PI_PLACEHOLDER_SYSTEM_PROMPT = "You are a helpful assistant."
 # pi package providing the web tools
 PI_WEB_PACKAGE = "npm:pi-web-access"
+SELECTION_ADJUSTMENT_HELP = (
+    "adjustments to the preset's, ?NAME adding NAME only if the harness has it"
+)
 # help of each on/off option pair, the option first
 BOOLEAN_OPTIONS = {
     "instruction-files": (
@@ -136,20 +139,41 @@ class UnsatisfiableError(Exception):
 
 @dataclasses.dataclass(frozen=True)
 class Selection:
-    """Set of tool or skill names: an explicit one, or the harness's own adjusted by additions and removals."""
+    """Set of tool or skill names: an explicit one, or the harness's own adjusted by additions and removals, along with optional names a harness adds only if it has them."""
 
     names: frozenset[str] | None
     added: frozenset[str] = frozenset()
+    optional: frozenset[str] = frozenset()
     removed: frozenset[str] = frozenset()
 
-    def adjust(self, added: frozenset[str], removed: frozenset[str]) -> Self:
-        """Add and remove names, removals winning."""
+    def adjust(
+        self,
+        *,
+        added: frozenset[str] = frozenset(),
+        optional: frozenset[str] = frozenset(),
+        removed: frozenset[str] = frozenset(),
+    ) -> Self:
+        """Add, optionally add and remove names, removals winning over additions, and additions over optional ones."""
+        added -= removed
+        optional -= added | removed
+        changed = added | optional | removed
         if self.names is not None:
-            return dataclasses.replace(self, names=(self.names | added) - removed)
+            return dataclasses.replace(
+                self,
+                names=(self.names - changed) | added,
+                optional=(self.optional - changed) | optional,
+            )
         return dataclasses.replace(
             self,
-            added=(self.added | added) - removed,
-            removed=(self.removed - added) | removed,
+            added=(self.added - changed) | added,
+            optional=(self.optional - changed) | optional,
+            removed=(self.removed - changed) | removed,
+        )
+
+    def resolve_optional(self, available: Container[str]) -> Self:
+        """Add the optional names a harness has, and drop the others."""
+        return dataclasses.replace(self, optional=frozenset()).adjust(
+            added=frozenset(name for name in self.optional if name in available)
         )
 
 
@@ -188,7 +212,7 @@ class Launch:
 
 
 class SelectionAction(argparse.Action):
-    """Argparse action setting a selection from a list of names, or adjusting it by +NAME and -NAME items."""
+    """Argparse action setting a selection from a list of names, or adjusting it by prefixed names."""
 
     def __call__(
         self,
@@ -200,18 +224,19 @@ class SelectionAction(argparse.Action):
         """Apply the option's value to the selection."""
         assert isinstance(values, str)
         items = values.split(",")
-        if not all(item.lstrip("+-") for item in items):
+        if not all(item.lstrip("+-?") for item in items):
             parser.error(f"Empty name in {option_string} {values}")
-        if all(item[0] not in "+-" for item in items):
+        if all(item[0] not in "+-?" for item in items):
             selection = Selection(frozenset(items))
-        elif all(item[0] in "+-" for item in items):
+        elif all(item[0] in "+-?" for item in items):
             selection = getattr(namespace, self.dest).adjust(
-                frozenset(item[1:] for item in items if item[0] == "+"),
-                frozenset(item[1:] for item in items if item[0] == "-"),
+                added=frozenset(item[1:] for item in items if item[0] == "+"),
+                optional=frozenset(item[1:] for item in items if item[0] == "?"),
+                removed=frozenset(item[1:] for item in items if item[0] == "-"),
             )
         else:
             parser.error(
-                f"{option_string} takes names or +/- adjustments, not both: {values}"
+                f"{option_string} takes names or +/-/? adjustments, not both: {values}"
             )
         setattr(namespace, self.dest, selection)
 
@@ -268,8 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--tools",
         action=SelectionAction,
         default=Selection(None),
-        metavar=f"[+|-]{{{','.join(TOOLS)}}},...",
-        help="Tools, or adjustments to the preset's",
+        metavar=f"[+|-|?]{{{','.join(TOOLS)}}},...",
+        help=f"Tools, or {SELECTION_ADJUSTMENT_HELP}",
     )
     parser.add_argument(
         "--no-tools",
@@ -282,8 +307,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--skills",
         action=SelectionAction,
         default=Selection(None),
-        metavar="[+|-]NAME,...",
-        help="Skills, or adjustments to the preset's",
+        metavar="[+|-|?]NAME,...",
+        help=f"Skills, or {SELECTION_ADJUSTMENT_HELP}",
     )
     parser.add_argument(
         "--no-skills",
@@ -381,7 +406,9 @@ def parse_request(argv: Sequence[str]) -> Request:
     request = Request(**args)
     tools = request.tools
     if (
-        unknown := ((tools.names or frozenset()) | tools.added | tools.removed)
+        unknown := (
+            (tools.names or frozenset()) | tools.added | tools.optional | tools.removed
+        )
         - TOOLS.keys()
     ):
         parser.error(f"Unknown tools: {', '.join(sorted(unknown))}")
@@ -452,9 +479,7 @@ def require_skills(found: dict[str, Path], names: Iterable[str]) -> list[Path]:
 
 def with_invoked_skill(skills: Selection, invoked: str | None) -> Selection:
     """Add the invoked skill, if any, to a skill selection."""
-    return (
-        skills if invoked is None else skills.adjust(frozenset({invoked}), frozenset())
-    )
+    return skills if invoked is None else skills.adjust(added=frozenset({invoked}))
 
 
 def harness_tools(harness: Harness, tools: Collection[str]) -> list[str]:
@@ -471,6 +496,9 @@ def harness_tools(harness: Harness, tools: Collection[str]) -> list[str]:
 
 def claude_tool_args(tools: Selection, *, skill_tool: bool) -> list[str]:
     """Build the claude arguments enabling a tool selection."""
+    tools = tools.resolve_optional(
+        {tool for tool, names in TOOLS.items() if Harness.CLAUDE in names}
+    )
     skill = ["Skill"] if skill_tool else []
     removed = harness_tools(Harness.CLAUDE, tools.removed)
     if tools.names is None and not tools.added:
@@ -521,6 +549,7 @@ def claude_settings(request: Request, skills: Selection) -> dict[str, object]:
 def claude_launch(request: Request, prompt: str) -> Launch:
     """Build the claude launch of a request."""
     skills = with_invoked_skill(request.skills, request.invoked_skill)
+    skills = skills.resolve_optional(find_skills(Harness.CLAUDE))
     argv = ["claude", "--model", request.model]
     if request.effort is not None:
         argv += ["--effort", "low" if request.effort == "none" else request.effort]
@@ -558,15 +587,31 @@ def session_args(request: Request, *, no_session: str) -> list[str]:
 
 def pi_tool_args(tools: Selection) -> list[str]:
     """Build the pi arguments enabling a tool selection."""
-    if "web" in (tools.added if tools.names is None else tools.names):
-        settings = Path.home() / ".pi/agent/settings.json"
-        if not (
-            settings.is_file()
-            and PI_WEB_PACKAGE in json.loads(settings.read_text()).get("packages", [])
-        ):
-            raise UnsatisfiableError(
-                f"has no web tool without the {PI_WEB_PACKAGE} package in {settings}"
-            )
+    settings = Path.home() / ".pi/agent/settings.json"
+    packages = (
+        json.loads(settings.read_text(encoding="utf-8-sig")).get("packages", [])
+        if settings.is_file()
+        else []
+    )
+    sources = [
+        package if isinstance(package, str) else package["source"]
+        for package in packages
+    ]
+    web = any(
+        source == PI_WEB_PACKAGE or source.startswith(f"{PI_WEB_PACKAGE}@")
+        for source in sources
+    )
+    tools = tools.resolve_optional(
+        {
+            tool
+            for tool, names in TOOLS.items()
+            if Harness.PI in names and (web or tool != "web")
+        }
+    )
+    if not web and "web" in (tools.added if tools.names is None else tools.names):
+        raise UnsatisfiableError(
+            f"has no web tool without the {PI_WEB_PACKAGE} package in {settings}"
+        )
     if tools.names == frozenset():
         return ["--no-tools"]
     if tools.names is not None:
@@ -582,9 +627,10 @@ def pi_tool_args(tools: Selection) -> list[str]:
 
 def pi_skill_args(skills: Selection) -> list[str]:
     """Build the pi arguments loading a skill selection."""
+    found = find_skills(Harness.PI)
+    skills = skills.resolve_optional(found)
     if skills.names == frozenset():
         return ["--no-skills"]
-    found = find_skills(Harness.PI)
     added = require_skills(found, skills.added)
     if skills.names is None and not skills.removed:
         return [arg for path in added for arg in ("--skill", str(path))]
@@ -695,6 +741,11 @@ def hax_launch(request: Request, prompt: str) -> Launch:
         raise UnsatisfiableError("has no MCP support")
     if request.session_id is not None:
         raise UnsatisfiableError("takes no session id")
+    request = dataclasses.replace(
+        request,
+        tools=request.tools.resolve_optional(HAX_OWN_TOOLS),
+        skills=request.skills.resolve_optional(find_skills(Harness.HAX)),
+    )
     raw_mode = request.tools.names == frozenset()
     if raw_mode and (
         request.skills.names != frozenset()
@@ -769,9 +820,10 @@ def select_launch(request: Request, prompt: str) -> Launch:
 def shell_overlap(tools: Selection) -> list[str]:
     """List the named tools the shell covers, when the shell is enabled alongside them."""
     if tools.names is None:
-        named, shell = tools.added, "shell" not in tools.removed
+        named, shell = tools.added | tools.optional, "shell" not in tools.removed
     else:
-        named, shell = tools.names, "shell" in tools.names
+        named = tools.names | tools.optional
+        shell = "shell" in named
     return sorted(named & SHELL_COVERED_TOOLS) if shell else []
 
 

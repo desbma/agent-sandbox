@@ -411,6 +411,89 @@ class TranslationTests(FakeHomeTestCase):
             ],
         )
 
+    def test_optional_selections(self) -> None:
+        """Launch optional names a harness has as additions, and the others as omitted."""
+        skill = self.home / ".pi/agent/skills/pi-only"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# pi-only\n")
+        for optional, equivalent in (
+            ("--model opus --tools ?grep", "--model opus --tools +grep"),
+            (
+                "--model gpt-6-luna --tools ?web,?subagent",
+                "--model gpt-6-luna --tools +subagent",
+            ),
+            (
+                "--harness pi --model gpt-6.1-sol --tools ?grep,?subagent",
+                "--harness pi --model gpt-6.1-sol --tools +grep",
+            ),
+            (
+                "--preset read-only --tools ?web --model gpt-6.1-sol",
+                "--preset read-only --tools +web --model gpt-6.1-sol",
+            ),
+            (
+                "--preset bare --model gpt-6-luna --tools ?shell",
+                "--preset bare --model gpt-6-luna --tools +shell",
+            ),
+            (
+                "--preset bare --model gpt-6-luna --tools ?shell,?read,?write,?edit",
+                "--preset bare --model gpt-6-luna --tools +shell,+read,+write,+edit",
+            ),
+            (
+                "--preset bare --model gpt-6-luna --skills ?review-correctness",
+                "--preset bare --model gpt-6-luna --skills +review-correctness",
+            ),
+            (
+                "--model opus --skills ?other-skill,?missing-skill",
+                "--model opus --skills +other-skill",
+            ),
+            ("--model gpt-6-luna --skills ?missing-skill", "--model gpt-6-luna"),
+            ("--model gpt-6-luna --skills ?pi-only", "--model gpt-6-luna"),
+            (
+                "--model gpt-6-luna --tools -read --skills ?pi-only",
+                "--model gpt-6-luna --tools -read --skills +pi-only",
+            ),
+            (
+                "--preset lean --model gpt-6.1-sol --skills ?review-correctness,?missing-skill",
+                "--preset lean --model gpt-6.1-sol --skills +review-correctness",
+            ),
+        ):
+            with self.subTest(optional=optional):
+                self.assertEqual(launch(optional), launch(equivalent))
+
+    def test_optional_pi_web_needs_package(self) -> None:
+        """Ignore optional web tools on pi when its settings do not install the package providing them."""
+        settings = self.home / ".pi/agent/settings.json"
+        for content in (
+            None,
+            {},
+            {"packages": ["npm:unrelated"]},
+            {"packages": ["npm:pi-web-access-extra"]},
+        ):
+            with self.subTest(content=content):
+                if content is None:
+                    settings.unlink()
+                else:
+                    settings.write_text(json.dumps(content))
+                self.assertEqual(
+                    launch("--preset lean --tools ?grep,?web --model gpt-6.1-sol"),
+                    launch("--preset lean --tools +grep --model gpt-6.1-sol"),
+                )
+
+    def test_pi_web_package_settings(self) -> None:
+        """Find the package providing pi's web tools in a pinned or object declaration, and in settings starting with a byte order mark."""
+        settings = self.home / ".pi/agent/settings.json"
+        for content in (
+            json.dumps({"packages": ["npm:pi-web-access@0.37.0"]}),
+            json.dumps({"packages": [{"source": "npm:pi-web-access"}]}),
+            f"\ufeff{json.dumps(PI_SETTINGS)}",
+        ):
+            with self.subTest(content=content):
+                settings.write_text(content)
+                self.assertEqual(
+                    launch("--preset read-only --tools ?web --model gpt-6.1-sol"),
+                    launch("--preset read-only --tools +web --model gpt-6.1-sol"),
+                )
+
     def test_fallback_skill_dir(self) -> None:
         """Look a skill up in the shared skill directory when no harness directory has it."""
         skill = self.home / ".config/agents/skills/fallback-skill"
@@ -507,9 +590,10 @@ class TranslationTests(FakeHomeTestCase):
             ("--skills ''", "Empty name in --skills"),
             (
                 "--skills review-correctness,+other",
-                "--skills takes names or +/- adjustments, not both",
+                "--skills takes names or +/-/? adjustments, not both",
             ),
             ("--tools unknown", "Unknown tools: unknown"),
+            ("--tools ?unknown", "Unknown tools: unknown"),
         ):
             with self.subTest(option=option):
                 stderr = io.StringIO()
@@ -518,23 +602,38 @@ class TranslationTests(FakeHomeTestCase):
                 self.assertIn(message, stderr.getvalue())
 
     def test_adjustment_precedence(self) -> None:
-        """Let removals win within an adjustment of a selection, and a later adjustment undo an earlier one."""
+        """Let removals win over additions and additions over optional ones within an adjustment of a selection, and a later adjustment override an earlier one on the names they share."""
+        grep = frozenset({"grep"})
+        added = agent_worker.Selection(None, added=grep)
+        optional = agent_worker.Selection(None, optional=grep)
+        removed = agent_worker.Selection(None, removed=grep)
         for options, expected in (
+            ("--tools +grep --tools -grep", removed),
+            ("--tools -grep --tools +grep", added),
+            ("--tools +grep,-grep", removed),
+            ("--tools read --tools +read,-read", agent_worker.Selection(frozenset())),
+            ("--tools +grep --tools ?grep", optional),
+            ("--tools ?grep --tools +grep", added),
+            ("--tools ?grep,+grep", added),
+            ("--tools ?grep,-grep", removed),
             (
-                "--tools +grep --tools -grep",
-                agent_worker.Selection(None, removed=frozenset({"grep"})),
+                "--tools read --tools ?read",
+                agent_worker.Selection(frozenset(), optional=frozenset({"read"})),
             ),
             (
-                "--tools -grep --tools +grep",
-                agent_worker.Selection(None, added=frozenset({"grep"})),
+                "--tools +grep,-read,?find --tools -web",
+                agent_worker.Selection(
+                    None,
+                    added=grep,
+                    optional=frozenset({"find"}),
+                    removed=frozenset({"read", "web"}),
+                ),
             ),
             (
-                "--tools +grep,-grep",
-                agent_worker.Selection(None, removed=frozenset({"grep"})),
-            ),
-            (
-                "--tools read --tools +read,-read",
-                agent_worker.Selection(frozenset()),
+                "--tools shell --tools ?grep --tools ?find",
+                agent_worker.Selection(
+                    frozenset({"shell"}), optional=frozenset({"grep", "find"})
+                ),
             ),
         ):
             with self.subTest(options=options):
@@ -663,15 +762,20 @@ class ProcessTests(FakeHomeTestCase):
                 )
 
     def test_shell_overlap_warned(self) -> None:
-        """Warn about the requested tools the shell already covers."""
-        result = self.run_worker("--model opus --preset lean --tools +read,+edit,+grep")
-        self.assertEqual(
-            (result.returncode, result.stderr),
-            (
-                0,
-                "Warning: the shell already covers grep, read, and models are better trained to do it through the shell\n",
-            ),
-        )
+        """Warn about the requested tools the shell already covers, the shell or the tools being optional."""
+        for command, covered in (
+            ("--model opus --preset lean --tools +read,+edit,?grep", "grep, read"),
+            ("--model opus --tools read --tools ?shell", "read"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_worker(command)
+                self.assertEqual(
+                    (result.returncode, result.stderr),
+                    (
+                        0,
+                        f"Warning: the shell already covers {covered}, and models are better trained to do it through the shell\n",
+                    ),
+                )
 
     def test_hax_stderr_shown_only_on_failure(self) -> None:
         """Hide hax's stderr when it succeeds, and show it with its exit status when it fails."""

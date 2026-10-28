@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the sandbox-coding-agent test suite, integration tests included, in an agent-microvm guest
-# launched from the repository root: agent-microvm bash workspace/tests/microvm-integration.sh
+# launched from the sandbox-coding-agent directory: ../agent-microvm/agent-microvm bash workspace/tests/microvm-integration.sh
 
 set -euo pipefail
 

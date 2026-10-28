@@ -16,7 +16,7 @@ from pathlib import Path
 
 from proxy_probe import Scenario
 
-AGENT_PROXY_PATH = Path(__file__).resolve().parent.parent / "agent-proxy/agent-proxy"
+AGENT_PROXY_PATH = Path(__file__).resolve().parent.parent / "agent-proxy"
 PROBE_PATH = Path(__file__).resolve().parent / "proxy_probe.py"
 INTEGRATION_ENV_VAR = "AGENT_PROXY_INTEGRATION"
 INTEGRATION_ENABLED = os.environ.get(INTEGRATION_ENV_VAR) is not None

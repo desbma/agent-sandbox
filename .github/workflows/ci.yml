@@ -12,10 +12,13 @@ jobs:
         with:
           python-version: ${{matrix.python-version}}
       - run: python3 -m unittest discover -s tests -v
-      - run: python3 -m unittest discover -s tests -v
         working-directory: agent-microvm
       - run: python3 -m unittest discover -s tests -v
+        working-directory: agent-proxy
+      - run: python3 -m unittest discover -s tests -v
         working-directory: agent-worker
+      - run: python3 -m unittest discover -s tests -v
+        working-directory: sandbox-coding-agent
 
   lint:
     runs-on: ubuntu-latest
@@ -65,9 +68,13 @@ jobs:
           mitmdump=$(nix build --no-link --print-out-paths "$NIXPKGS#mitmproxy")/bin/mitmdump
           sudo ln -sf "$mitmdump" /usr/bin/mitmdump
       - run: python3 -m unittest discover -s tests -v
+        working-directory: agent-proxy
+        env:
+          AGENT_PROXY_INTEGRATION: "1"
+      - run: python3 -m unittest discover -s tests -v
+        working-directory: sandbox-coding-agent
         env:
           SANDBOX_CODING_AGENT_INTEGRATION: "1"
-          AGENT_PROXY_INTEGRATION: "1"
       - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" --command python3 -m unittest tests.test_integration -v
         working-directory: agent-microvm
         env:
@@ -84,6 +91,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - run: *sandbox-prerequisites
       - run: nix shell "$NIXPKGS#hyperfine" --command python3 -m unittest discover -s tests -p test_performance.py -v
+        working-directory: sandbox-coding-agent
         env:
           SANDBOX_CODING_AGENT_PERFORMANCE: "1"
       - run: nix shell "$NIXPKGS#qemu" "$NIXPKGS#passt" "$NIXPKGS#virtiofsd" "$NIXPKGS#cpio" "$NIXPKGS#squashfsTools" "$NIXPKGS#hyperfine" --command python3 -m unittest tests.test_performance -v

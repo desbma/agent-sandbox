@@ -2,7 +2,7 @@
 
 Tooling to run coding agents (Claude Code, Codex, Amp, hax, pi) inside tight, disposable sandboxes on the host, without ever needing `sudo`:
 
-- **`sandbox-coding-agent`** (repository root): the default host boundary, a Bubblewrap launcher giving the agent a locked-down filesystem and its own network, cut off from host loopback. pasta must never spawn bwrap itself: it would close the memfds bwrap reads generated files from, and leave SIGUSR1 blocked in the sandbox.
+- **`sandbox-coding-agent/`**: the default host boundary, a Bubblewrap launcher giving the agent a locked-down filesystem and its own network, cut off from host loopback. pasta must never spawn bwrap itself: it would close the memfds bwrap reads generated files from, and leave SIGUSR1 blocked in the sandbox.
 - **`agent-microvm/`**: an escalation path for tasks the sandbox denies (real root, mounting images, low-level networking, privileged services), booting a throwaway, root-capable microVM nested inside the sandbox, so everything stays doubly contained. It is packaged as a skill; see the [agent-microvm component](#agent-microvm-component) section.
 - **`agent-proxy/`**: an optional host-side mitmproxy service giving `gh` access to the GitHub API without the sandbox ever holding the token, and carrying all of the sandbox's HTTPS traffic. mitmproxy exposes no hook reaching upstream sockets, so the proxy patches how mitmproxy opens them; only its integration test catches a mitmproxy release that bypasses the patch.
 - **`agent-worker/`**: a launcher starting a coding-agent harness non-interactively, for multi-agent workflows. The harness behavior it relies on was checked against Claude Code 2.1.309, pi 1.4.0 and hax 0.6.1, and can drift with later releases.
@@ -35,24 +35,34 @@ These conventions apply repository-wide, to test code as much as to main code.
 
 ## Testing, Linting & Formatting
 
-All code must pass linting, type checking and formatting under the strict config in the root `pyproject.toml`, and every unit suite must pass, all without `sudo`. Extensionless scripts must be listed in `pyproject.toml`, ruff's and ty's directory traversal skipping them. From the repository root, then from each of `agent-microvm/` and `agent-worker/` for their unit suites:
+All code must pass linting, type checking and formatting under the strict config in the root `pyproject.toml`, and every unit suite must pass, all without `sudo`. Extensionless scripts must be listed in `pyproject.toml`, ruff's and ty's directory traversal skipping them. From the repository root:
 
 ```sh
 ruff check
 ruff format --check
 ty check
+```
+
+Then from each of `agent-microvm/`, `agent-proxy/`, `agent-worker/` and `sandbox-coding-agent/`, for its unit suite:
+
+```sh
 python3 -m unittest discover -s tests
 ```
 
-Opt-in suites, from the repository root:
+Opt-in suites, from `agent-proxy/`:
 
 ```sh
-# sandbox-coding-agent integration and unit suites, in a microVM's Debian root: they need /dev/net/tun, which the agent sandbox withholds
-agent-microvm/agent-microvm bash workspace/tests/microvm-integration.sh
-# sandbox-coding-agent performance: also needs hyperfine 2 or later and jj, so it does not run inside the agent sandbox either
+# integration: needs mitmdump, openssl, iproute2, the netem qdisc and unprivileged user namespaces; takes about 3.5 minutes
+AGENT_PROXY_INTEGRATION=1 python3 -m unittest discover -s tests
+```
+
+From `sandbox-coding-agent/`:
+
+```sh
+# integration and unit suites, in a microVM's Debian root: they need /dev/net/tun, which the agent sandbox withholds
+../agent-microvm/agent-microvm bash workspace/tests/microvm-integration.sh
+# performance: also needs hyperfine 2 or later and jj, so it does not run inside the agent sandbox either
 SANDBOX_CODING_AGENT_PERFORMANCE=1 python3 -m unittest discover -s tests -p test_performance.py
-# agent-proxy integration: needs mitmdump, openssl, iproute2, the netem qdisc and unprivileged user namespaces; takes about 3.5 minutes
-AGENT_PROXY_INTEGRATION=1 python3 -m unittest discover -s tests -p test_agent_proxy.py
 ```
 
 From `agent-microvm/`:

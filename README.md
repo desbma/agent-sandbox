@@ -73,7 +73,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 
 Example for Claude Code:
 
-1. Copy `sandbox-coding-agent` in `~/.local/bin` or `/usr/local/bin`
+1. Copy `sandbox-coding-agent/sandbox-coding-agent` in `~/.local/bin` or `/usr/local/bin`
 
 2. Create a wrapper script in `~/.local/bin/claude` or `/usr/local/bin/claude`:
 

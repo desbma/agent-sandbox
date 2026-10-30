@@ -99,7 +99,7 @@ CLAUDE_OWN_TOOLS = (
 CLAUDE_UNBUNDLED_SKILLS = frozenset({"plugin-authoring"})
 HAX_FIXED_TOOLS = frozenset({"shell", "read", "write", "edit"})
 HAX_OWN_TOOLS = HAX_FIXED_TOOLS | {"subagent"}
-# hax variables a launch can set, never inherited
+# hax variables overriding the request, never inherited
 HAX_LAUNCH_VARIABLES = frozenset(
     {
         "HAX_MAX_TURNS",
@@ -107,6 +107,7 @@ HAX_LAUNCH_VARIABLES = frozenset(
         "HAX_NO_SKILLS",
         "HAX_NO_SUBAGENTS",
         "HAX_NO_TASKS",
+        "HAX_PRESET",
         "HAX_SYSTEM_PROMPT",
         "HAX_SYSTEM_PROMPT_APPEND",
     }
@@ -619,6 +620,13 @@ def system_prompt_args(system_prompt: str | None, appended: str | None) -> list[
     return args + ([] if appended is None else ["--append-system-prompt", appended])
 
 
+def appended_system_prompt(request: Request) -> str | None:
+    """Return the text appended to the system prompt, empty when the request replaces the prompt without appending."""
+    if request.system_prompt is not None and request.appended_system_prompt is None:
+        return ""
+    return request.appended_system_prompt
+
+
 def session_args(request: Request, *, no_session: str) -> list[str]:
     """Build the arguments naming the session or turning it off."""
     if request.session_id is not None:
@@ -810,13 +818,9 @@ def pi_launch(request: Request, prompt: str) -> Launch:
     if not request.mcp:
         argv.append("--no-mcp")
     system_prompt = request.system_prompt
-    appended = request.appended_system_prompt
     if system_prompt == "":
         system_prompt = PI_PLACEHOLDER_SYSTEM_PROMPT
-        # an empty appendix, else pi appends its APPEND_SYSTEM.md
-        if appended is None:
-            appended = ""
-    argv += system_prompt_args(system_prompt, appended)
+    argv += system_prompt_args(system_prompt, appended_system_prompt(request))
     argv += session_args(request, no_session="--no-session")
     if request.events:
         argv += ["--mode", "json"]
@@ -862,8 +866,8 @@ def hax_environment(request: Request) -> dict[str, str]:
         env["HAX_NO_AGENTS_MD"] = "1"
     if request.system_prompt is not None:
         env["HAX_SYSTEM_PROMPT"] = request.system_prompt
-    if request.appended_system_prompt is not None:
-        env["HAX_SYSTEM_PROMPT_APPEND"] = request.appended_system_prompt
+    if (appended := appended_system_prompt(request)) is not None:
+        env["HAX_SYSTEM_PROMPT_APPEND"] = appended
     return env
 
 

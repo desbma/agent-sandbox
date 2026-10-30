@@ -134,6 +134,43 @@ class TranslationTests(FakeHomeTestCase):
                     argv=f"pi --model openai-codex/gpt-6.1-sol:off --no-tools --no-extensions --no-skills --no-context-files --no-mcp --system-prompt 'You are a helpful assistant.' --append-system-prompt {appended} --no-session -p",
                 )
 
+    def test_replaced_system_prompt_gets_empty_appendix(self) -> None:
+        """Pass an empty appendix with a system prompt replaced or removed without one."""
+        for command, argv, env in (
+            (
+                "--harness pi --model gpt-6.1-sol --system-prompt SYSTEM",
+                "pi --model openai-codex/gpt-6.1-sol --no-mcp --system-prompt SYSTEM --append-system-prompt '' -p",
+                {},
+            ),
+            (
+                "--model gpt-6-luna --system-prompt SYSTEM",
+                "hax --provider=codex --model=gpt-6-luna -p",
+                {"HAX_SYSTEM_PROMPT": "SYSTEM", "HAX_SYSTEM_PROMPT_APPEND": ""},
+            ),
+            (
+                "--model gpt-6-luna --no-system-prompt",
+                "hax --provider=codex --model=gpt-6-luna -p",
+                {"HAX_SYSTEM_PROMPT": "", "HAX_SYSTEM_PROMPT_APPEND": ""},
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assert_launch(f"{command} -- PROMPT", argv=argv, env=env)
+
+    def test_kept_system_prompt_gets_appendix_as_given(self) -> None:
+        """Pass the appendix as given, an empty one included, with the system prompt kept."""
+        for appended in ("APPENDED", ""):
+            with self.subTest(appended=appended):
+                quoted = shlex.quote(appended)
+                self.assert_launch(
+                    f"--harness pi --model gpt-6.1-sol --append-system-prompt {quoted} -- PROMPT",
+                    argv=f"pi --model openai-codex/gpt-6.1-sol --no-mcp --append-system-prompt {quoted} -p",
+                )
+                self.assert_launch(
+                    f"--model gpt-6-luna --append-system-prompt {quoted} -- PROMPT",
+                    argv="hax --provider=codex --model=gpt-6-luna -p",
+                    env={"HAX_SYSTEM_PROMPT_APPEND": appended},
+                )
+
     def test_full_without_subagents_runs_hax(self) -> None:
         """Remove hax's subagents through its environment."""
         self.assert_launch(
@@ -1001,7 +1038,7 @@ class ProcessTests(FakeHomeTestCase):
         for command, expected in (
             (
                 "--model gpt-6-luna --tools -subagent --system-prompt 'be brief'",
-                "HAX_NO_SUBAGENTS=1 HAX_SYSTEM_PROMPT='be brief' hax --provider=codex --model=gpt-6-luna -p\n",
+                "HAX_NO_SUBAGENTS=1 HAX_SYSTEM_PROMPT='be brief' HAX_SYSTEM_PROMPT_APPEND='' hax --provider=codex --model=gpt-6-luna -p\n",
             ),
             (
                 "--model haiku --no-system-prompt",
@@ -1056,11 +1093,16 @@ class ProcessTests(FakeHomeTestCase):
             self.assertEqual(worker.stdout.read(), "")
 
     def test_inherited_hax_variables_dropped(self) -> None:
-        """Drop the inherited hax variables a launch controls, and keep the others."""
+        """Drop the inherited hax variables overriding the request, and keep the others."""
         (self.bin_dir / "hax").write_text("#!/bin/sh\nenv | grep '^HAX_' | sort\n")
         result = self.run_worker(
             "--model gpt-6-luna --tools -subagent",
-            env={"HAX_MAX_TURNS": "3", "HAX_SYSTEM_PROMPT": "parent", "HAX_TRACE": "1"},
+            env={
+                "HAX_MAX_TURNS": "3",
+                "HAX_PRESET": "parent",
+                "HAX_SYSTEM_PROMPT": "parent",
+                "HAX_TRACE": "1",
+            },
         )
         self.assertEqual(
             (result.returncode, result.stdout), (0, "HAX_NO_SUBAGENTS=1\nHAX_TRACE=1\n")

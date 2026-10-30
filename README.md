@@ -4,15 +4,13 @@ Opinionated solution for sandboxing coding agents on Linux.
 
 ---
 
-**This repository contains personal tools that I publish for sharing, documentation and convenience.**
-
-**They may or may not work for your use case, and little effort has been made to support systems and workflows other than the ones I use.**
+**This repository contains personal tools that I publish for sharing, documentation and convenience. They may or may not work for your use case, and little effort has been made to support systems and workflows other than the ones I use.**
 
 ---
 
 ## Rationale & philosophy
 
-The core principle of coding agents involves allowing a stochastic model to run random commands on your system. That premise is RCE _by design_.
+The core principle of coding agents involves allowing a stochastic model to run random commands on your system. This is RCE not as a vulnerability, but _by design_.
 
 Built-in solutions in existing agents either involve a simplistic permission system, that everyone bypasses in practice because of approval fatigue, or internal "security theater" sandboxes that the model can bypass on demand.
 
@@ -37,33 +35,17 @@ The sandbox and microVM scripts were preceded by experiments with different cont
 
 - Supported agents: [Amp](https://ampcode.com/), [Claude Code](https://claude.com/product/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [hax](https://usehax.dev/), [Pi](https://pi.dev/)
 - Startup overhead <80ms
-- Unshares **all** namespaces: the agent can not access processes, devices, users, etc. outside of its sandbox
-- Builds filesystem namespace tailored for the agent:
-  - current directory shared as read/write
-  - `.git`/`.jj` VCS directories are mounted read-only: the agent can not do commits or change history
-  - most of the filesystem (`/etc/`, `/home`, `/run`, `/var`, etc.) is either not mounted or cleaned up to contain a minimal allowlist
-  - cache directories used for development (`cargo`, `uv`...) are mounted as OverlayFS: the agent inherits the host's content (major speedup), but the changes it makes are not reflected on the host
-  - project build directories (Rust `target/`, Python `.venv`) are mounted as OverlayFS as well: reusing the artifacts already built on the host avoids full rebuilds, which can save minutes on big projects
-- Provides per-project directories shared read/write with the host:
-  - handoff `~/.local/state/agents/handoff/<project>`: notes and plan files an agent carries over to a later session
-  - review `~/.local/state/agents/reviews/<project>`: code reviews of the changes under way, written by the user and by review agents
-  - exchange `$XDG_RUNTIME_DIR/agents/<project>`: other files to share with the user that don't belong in the repository
-- Scratch mode when the launch directory is under `/tmp`: none of these directories is set up, and each agent's session history (Claude Code projects, Codex sessions, etc.) is mounted on a tmpfs, so a throwaway task leaves no transcript on the host
-- [Jujutsu](https://jj-vcs.github.io/jj/) aware:
-  - `jj` is wrapped to always run with `--ignore-working-copy`, which keeps it usable despite the read-only `.jj` directory
-  - the default workspace's VCS directories are exposed alongside the current one, so commands still work from a secondary workspace
-  - the per-project directories above and Claude Code's project memory are shared between all workspaces of a repository
-- Injects a small prompt to describe the sandbox to the agent, its directories and mount points, etc. It is appended to the agent's global instructions, built from `~/.config/agents/AGENTS.md` and, if present, the agent specific `~/.config/agents/AGENTS.<agent>.md` (ie. `AGENTS.claude.md`)
-- Remaps agent directories to [XDG](https://specifications.freedesktop.org/basedir/latest/) compliant ones (ie. Claude config lives in `~/.config/claude` on the host, instead of the default `~/.claude`)
-- Provisions hax and Pi, when installed, alongside the launched agent, so it can spawn them as subagents, typically to get a review from a different model
-- Optional auth profiles (every agent but Amp), to run an agent under a second account without logging in and out: `SANDBOX_AGENT_<AGENT>_AUTH=<profile>` switches the agent's credentials to a per-profile file, created empty on first use (ie. `SANDBOX_AGENT_CLAUDE_AUTH=pro` uses `~/.config/claude/.credentials-pro.json`)
-- Applies per-agent quality of life fixes: Codex CLI trusts the launch directory instead of prompting about it, Pi keeps its extension modules in its own state directory, etc.
-- Safeguards against accidental launches from the wrong directory: the home directory is rejected, and a repository subdirectory offers to switch to the repository root
-- Exposes `/dev/kvm` and the host CPU topology, so the agent can run nested VMs with a matching core layout and pinned vCPUs: this is what lets `agent-microvm` work from inside the sandbox
-- Gives the agent its own network through [pasta](https://passt.top/):
-  - outgoing connections are allowed, except to the host's loopback, where only DNS and [`agent-proxy`](#agent-proxy) are reachable
-  - incoming connections from the host's loopback are allowed to the ports the agent listens on
-- Optionally routes HTTPS traffic through [`agent-proxy`](#agent-proxy), so [`gh`](https://github.com/cli/cli) reaches the GitHub API inside the sandbox without ever exposing the token to the agent
+- Unshares **all** namespaces (cgroup, IPC, mount, network, PID, user, UTS)
+- Builds a filesystem tailored for the agent:
+  - shared read-write: the current directory, and per-project handoff, review and exchange directories
+  - read-only: system directories (`/usr`, an allowlist of `/etc`...), agent instructions, a few tool configs, and the `.git`/`.jj` VCS directories
+  - overlayfs, with writes kept in the sandbox: development caches (`cargo`, `uv`...) and build directories (Rust `target/`, Python `.venv`)
+  - shadowed by an empty tmpfs, with only an allowlist mounted back: `$HOME`, `/run`, `/tmp`..., and in scratch mode (launch directory under `/tmp`) each agent's session history
+- Gives the agent its own network through [pasta](https://passt.top/): outgoing connections are allowed except to the host's loopback, where only DNS and the optional [`agent-proxy`](#agent-proxy) are reachable, and the ports the agent listens on are reachable from the host's loopback
+- Exposes `/dev/kvm` and the host CPU topology
+- Injects a prompt describing the sandbox, appended to the global instructions
+- Auth profiles switching an agent to another account: `SANDBOX_AGENT_<AGENT>_AUTH=<profile>`
+- Quality of life: [Jujutsu](https://jj-vcs.github.io/jj/) support, secondary workspaces included, [XDG](https://specifications.freedesktop.org/basedir/latest/) agent directories, hax and Pi available as subagents, wrong launch directory detection, etc.
 
 ### Requirements
 
@@ -159,7 +141,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
 
 ### Features
 
-- Starts [Claude Code](https://claude.com/product/claude-code), [hax](https://usehax.dev/) or [Pi](https://pi.dev/) non-interactively: no permission prompt, prompt from the arguments or stdin, final answer or JSON event stream on stdout
+- Starts [Claude Code](https://claude.com/product/claude-code), [hax](https://usehax.dev/) or [Pi](https://pi.dev/) non-interactively: tools run without asking for approval, the prompt comes from the arguments or stdin, and the final answer or JSON event stream goes to stdout
 - One command line for all three harnesses, abstracting away most of their differences, and simpler than any of theirs: presets (`full`, `standard`, `read-only`, `lean`, `bare`) adjusted by arguments for tools, skills, extensions, instruction files, memory, git context, MCP and system prompt
 - Picks the harness from the model and the constraints: Anthropic models go to Claude Code, GPT models to hax, or to Pi when hax can not satisfy the request
 - Shows hax's stderr, written on every run, only when it fails

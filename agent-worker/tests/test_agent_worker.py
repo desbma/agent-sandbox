@@ -98,6 +98,12 @@ def launch(command: str) -> agent_worker.Launch:
     return agent_worker.select_launch(request, " ".join(request.prompt))
 
 
+def claude_settings(command: str) -> dict[str, object]:
+    """Return the settings a command line passes claude."""
+    argv = launch(command).argv
+    return json.loads(argv[argv.index("--settings") + 1])
+
+
 class TranslationTests(FakeHomeTestCase):
     """Tests of the harness launch a command line translates into."""
 
@@ -198,8 +204,17 @@ class TranslationTests(FakeHomeTestCase):
         """Give claude the shell and file tools, keeping its system prompt and instruction files."""
         self.assert_launch(
             "--preset standard --model opus -- PROMPT",
-            argv="""claude --model opus --tools Bash,Read,Write,Edit --disable-slash-commands --strict-mcp-config --settings '{"autoMemoryEnabled": false, "includeGitInstructions": false}' --permission-mode bypassPermissions -p""",
+            argv="""claude --model opus --tools Bash,Read,Write,Edit --disable-slash-commands --strict-mcp-config --settings '{"outputStyle": "default", "autoMemoryEnabled": false, "includeGitInstructions": false}' --permission-mode bypassPermissions -p""",
         )
+
+    def test_claude_default_output_style(self) -> None:
+        """Give claude its default output style whatever the preset."""
+        for preset in agent_worker.PRESETS:
+            with self.subTest(preset=preset):
+                self.assertEqual(
+                    claude_settings(f"--preset {preset} --model opus")["outputStyle"],
+                    "default",
+                )
 
     def test_session_id_runs_pi(self) -> None:
         """Run on pi a GPT request naming its session, hax taking no session id."""
@@ -341,7 +356,7 @@ class TranslationTests(FakeHomeTestCase):
                 "",
                 "--settings",
                 (
-                    '{"autoMemoryEnabled": false, "includeGitInstructions": false, '
+                    '{"outputStyle": "default", "autoMemoryEnabled": false, "includeGitInstructions": false, '
                     '"disableBundledSkills": true, "skillOverrides": '
                     '{"other-skill": "off", "plugin-authoring": "off", "review-judge": "on"}}'
                 ),
@@ -362,7 +377,7 @@ class TranslationTests(FakeHomeTestCase):
                 "opus",
                 "--strict-mcp-config",
                 "--settings",
-                '{"skillOverrides": {"other-skill": "on", "review-judge": "off"}}',
+                '{"outputStyle": "default", "skillOverrides": {"other-skill": "on", "review-judge": "off"}}',
                 "--permission-mode",
                 "bypassPermissions",
                 "-p",
@@ -373,7 +388,7 @@ class TranslationTests(FakeHomeTestCase):
         """Pass claude the options a request sets, effort none becoming low."""
         self.assert_launch(
             "--model opus --effort none --mcp --system-prompt SYSTEM --max-turns 3 --no-session --json -- PROMPT",
-            argv="claude --model opus --effort low --system-prompt SYSTEM --max-turns 3 --no-session-persistence --output-format stream-json --verbose --permission-mode bypassPermissions -p",
+            argv="""claude --model opus --effort low --system-prompt SYSTEM --settings '{"outputStyle": "default"}' --max-turns 3 --no-session-persistence --output-format stream-json --verbose --permission-mode bypassPermissions -p""",
         )
 
     def test_hax_effort_raised_to_model_level(self) -> None:
@@ -411,7 +426,7 @@ class TranslationTests(FakeHomeTestCase):
         for command, argv in (
             (
                 "--model opus --tools -shell",
-                "claude --model opus --disallowedTools Bash --strict-mcp-config --permission-mode bypassPermissions -p",
+                """claude --model opus --disallowedTools Bash --strict-mcp-config --settings '{"outputStyle": "default"}' --permission-mode bypassPermissions -p""",
             ),
             (
                 "--model gpt-6.1-sol --tools +grep,-shell",
@@ -461,6 +476,8 @@ class TranslationTests(FakeHomeTestCase):
                 "--tools",
                 ",".join([*agent_worker.CLAUDE_OWN_TOOLS, "Grep", "Skill"]),
                 "--strict-mcp-config",
+                "--settings",
+                '{"outputStyle": "default"}',
                 "--permission-mode",
                 "bypassPermissions",
                 "-p",
@@ -776,10 +793,11 @@ class TranslationTests(FakeHomeTestCase):
             ("--preset lean", {"probe@mp": False, "other@mp": False}),
         ):
             with self.subTest(options=options):
-                argv = launch(f"--model opus {options}").argv
-                settings = json.loads(argv[argv.index("--settings") + 1])
-                self.assertEqual(settings["enabledPlugins"], enabled)
-        self.assertNotIn("--settings", launch("--model opus").argv)
+                self.assertEqual(
+                    claude_settings(f"--model opus {options}")["enabledPlugins"],
+                    enabled,
+                )
+        self.assertNotIn("enabledPlugins", claude_settings("--model opus"))
         self.assert_refusal(
             "--model opus --extensions +missing@mp",
             "No harness can satisfy the request:\n  claude: has no plugin missing@mp",
@@ -841,7 +859,7 @@ class TranslationTests(FakeHomeTestCase):
                 "--system-prompt",
                 "",
                 "--settings",
-                '{"claudeMdExcludes": ["**"], "includeGitInstructions": false}',
+                '{"outputStyle": "default", "claudeMdExcludes": ["**"], "includeGitInstructions": false}',
                 "--permission-mode",
                 "bypassPermissions",
                 "-p",
@@ -1011,7 +1029,7 @@ class ProcessTests(FakeHomeTestCase):
             (result.returncode, result.stdout, result.stderr),
             (
                 0,
-                "--model\nhaiku\n--strict-mcp-config\n--permission-mode\nbypassPermissions\n-p\n--tools -read --skills +task",
+                '--model\nhaiku\n--strict-mcp-config\n--settings\n{"outputStyle": "default"}\n--permission-mode\nbypassPermissions\n-p\n--tools -read --skills +task',
                 "",
             ),
         )
@@ -1024,7 +1042,7 @@ class ProcessTests(FakeHomeTestCase):
             (result.returncode, result.stdout, result.stderr),
             (
                 0,
-                f"--model\nhaiku\n--strict-mcp-config\n--permission-mode\nbypassPermissions\n-p\n{prompt}",
+                f'--model\nhaiku\n--strict-mcp-config\n--settings\n{{"outputStyle": "default"}}\n--permission-mode\nbypassPermissions\n-p\n{prompt}',
                 "",
             ),
         )
@@ -1042,7 +1060,7 @@ class ProcessTests(FakeHomeTestCase):
             ),
             (
                 "--model haiku --no-system-prompt",
-                "claude --model haiku --strict-mcp-config --system-prompt '' --permission-mode bypassPermissions -p\n",
+                """claude --model haiku --strict-mcp-config --system-prompt '' --settings '{"outputStyle": "default"}' --permission-mode bypassPermissions -p\n""",
             ),
         ):
             with self.subTest(command=command):

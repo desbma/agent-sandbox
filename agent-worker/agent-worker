@@ -560,7 +560,7 @@ def claude_skill_settings(skills: Selection) -> dict[str, object]:
 
 def claude_settings(request: Request, skills: Selection) -> dict[str, object]:
     """Build the claude settings a request implies."""
-    settings: dict[str, object] = {}
+    settings: dict[str, object] = {"outputStyle": "default"}
     if not request.instruction_files:
         settings["claudeMdExcludes"] = ["**"]
     if not request.memory:
@@ -602,8 +602,7 @@ def claude_launch(request: Request, prompt: str) -> Launch:
     if not request.mcp:
         argv.append("--strict-mcp-config")
     argv += system_prompt_args(request.system_prompt, request.appended_system_prompt)
-    if settings := claude_settings(request, skills):
-        argv += ["--settings", json.dumps(settings)]
+    argv += ["--settings", json.dumps(claude_settings(request, skills))]
     if request.max_turns is not None:
         argv += ["--max-turns", str(request.max_turns)]
     argv += session_args(request, no_session="--no-session-persistence")

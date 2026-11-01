@@ -152,7 +152,7 @@ For example:
 
 runs:
 
-`echo '/security-review change.diff' | claude --model opus --tools Read,Grep,Glob,WebFetch,WebSearch,Skill --strict-mcp-config --settings '{"autoMemoryEnabled": false, "includeGitInstructions": false, "disableBundledSkills": true, "skillOverrides": {"agent-microvm": "off", "changelog": "off", "commit-message": "off", "docx": "off", "frontend-design": "off", "pdf": "off", "plugin-authoring": "off", "security-review": "on", "test-writer": "off"}}' --no-session-persistence --output-format stream-json --verbose --permission-mode bypassPermissions -p`
+`echo '/security-review change.diff' | claude --model opus --tools Read,Grep,Glob,WebFetch,WebSearch,Skill --strict-mcp-config --settings '{"outputStyle": "default", "autoMemoryEnabled": false, "includeGitInstructions": false, "disableBundledSkills": true, "skillOverrides": {"agent-microvm": "off", "changelog": "off", "commit-message": "off", "docx": "off", "frontend-design": "off", "pdf": "off", "plugin-authoring": "off", "security-review": "on", "test-writer": "off"}}' --no-session-persistence --output-format stream-json --verbose --permission-mode bypassPermissions -p`
 
 ### Requirements
 

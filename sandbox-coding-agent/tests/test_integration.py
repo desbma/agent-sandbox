@@ -47,8 +47,10 @@ PACMAN_DB_DIR = Path("/var/lib/pacman")
 HAX_PROFILE_STATE_DIR = Path("/run/sandbox-coding-agent/hax-state")
 # the port the launcher forwards to agent-proxy (its PROXY_PORT constant)
 PROXY_PORT = 8085
-# ports outside the ephemeral range, which pasta's automatic forwarding skips
-FORWARDABLE_PORTS = range(20000, 30000)
+# the sandbox ports the launcher forwards from host loopback (its FORWARDED_PORTS constant)
+FORWARDED_PORTS = range(18000, 18100)
+# ports pasta's default automatic forwarding covers, outside the launcher's forwarded ones
+UNFORWARDED_PORTS = range(20000, 30000)
 POLL_SECONDS = 0.1
 
 
@@ -147,23 +149,25 @@ class SandboxFixture:
         )
 
 
-def bind_forwardable_port(
+def bind_free_port(
     host: str,
+    ports: range,
     *,
     family: socket.AddressFamily = socket.AF_INET,
     kind: socket.SocketKind = socket.SOCK_STREAM,
 ) -> socket.socket:
-    """Return a socket bound to host on a random free port outside the ephemeral range."""
-    while True:
+    """Return a socket bound to host on a random free port among ports."""
+    for port in random.sample(ports, len(ports)):
         sock = socket.socket(family, kind)
         try:
-            sock.bind((host, random.choice(FORWARDABLE_PORTS)))
+            sock.bind((host, port))
         except OSError as exc:
             sock.close()
             if exc.errno != errno.EADDRINUSE:
                 raise
         else:
             return sock
+    raise RuntimeError(f"No free port in {ports}")
 
 
 def default_gateway() -> str:
@@ -177,8 +181,8 @@ def default_gateway() -> str:
 
 def read_greeting(
     port: int, probe: concurrent.futures.Future[dict[str, object]]
-) -> bytes:
-    """Connect to a host loopback port until a server listens there while the probe runs, and return what it sends."""
+) -> bytes | None:
+    """Connect to a host loopback port until a server listens there while the probe runs, and return what it sends, or None if nothing listened."""
     while not probe.done():
         try:
             with socket.create_connection(
@@ -187,8 +191,7 @@ def read_greeting(
                 return client.recv(len(SERVER_GREETING))
         except ConnectionRefusedError:
             time.sleep(POLL_SECONDS)
-    probe.result()
-    raise RuntimeError(f"Nothing listened on 127.0.0.1:{port} while the probe ran")
+    return None
 
 
 class SandboxTestCase(unittest.TestCase):
@@ -781,9 +784,11 @@ class NetworkTests(SandboxTestCase):
         """Keep host loopback TCP, UDP and abstract unix listeners out of reach, even through the gateway address."""
         abstract_name = f"\0{self.fixture.root.name}"
         with (
-            bind_forwardable_port("127.0.0.1") as tcp4,
-            bind_forwardable_port("::1", family=socket.AF_INET6) as tcp6,
-            bind_forwardable_port("127.0.0.1", kind=socket.SOCK_DGRAM) as udp,
+            bind_free_port("127.0.0.1", UNFORWARDED_PORTS) as tcp4,
+            bind_free_port("::1", UNFORWARDED_PORTS, family=socket.AF_INET6) as tcp6,
+            bind_free_port(
+                "127.0.0.1", UNFORWARDED_PORTS, kind=socket.SOCK_DGRAM
+            ) as udp,
             socket.socket(socket.AF_UNIX) as unix,
         ):
             unix.bind(abstract_name)
@@ -844,21 +849,43 @@ class NetworkTests(SandboxTestCase):
         self.assertEqual(report["proxy"], "ok")
         self.assertEqual(readable, [proxy])
 
-    def test_sandbox_server_reachable_from_host_loopback(self) -> None:
-        """Forward host loopback connections to a server on the same sandbox loopback port."""
-        with bind_forwardable_port("127.0.0.1") as free:
+    def serve_in_sandbox(
+        self, ports: range, ops: collections.abc.Sequence[Op] = ()
+    ) -> tuple[str, bytes | None]:
+        """Run ops then a sandbox server on a port among ports, and return its outcome and what host loopback reads from that port."""
+        with bind_free_port("127.0.0.1", ports) as free:
             port = free.getsockname()[1]
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             probe = executor.submit(
                 self.run_probe,
-                [Op("serve", OpKind.SERVE, f"127.0.0.1:{port}")],
+                [*ops, Op("serve", OpKind.SERVE, f"127.0.0.1:{port}")],
                 agent="claude",
             )
             greeting = read_greeting(port, probe)
 
-        self.assertEqual(probe.result()["serve"], "ok")
-        self.assertEqual(greeting, SERVER_GREETING)
+        return self.report_str(probe.result(), "serve"), greeting
+
+    def test_sandbox_server_reachable_from_host_loopback(self) -> None:
+        """Forward host loopback connections to a server on the same sandbox loopback port, among the forwarded ones."""
+        self.assertEqual(
+            self.serve_in_sandbox(FORWARDED_PORTS), ("ok", SERVER_GREETING)
+        )
+
+    def test_sandbox_server_outside_forwarded_ports_unreachable(self) -> None:
+        """Keep a sandbox server on a port outside the forwarded ones out of reach from host loopback."""
+        self.assertEqual(self.serve_in_sandbox(UNFORWARDED_PORTS), ("timed out", None))
+
+    def test_sandbox_server_reachable_past_busy_forwarded_port(self) -> None:
+        """Forward a sandbox server even when the host already uses a lower forwarded port the sandbox listens on too."""
+        with bind_free_port("127.0.0.1", FORWARDED_PORTS[:50]) as busy:
+            busy.listen()
+            busy_address = f"127.0.0.1:{busy.getsockname()[1]}"
+            outcome = self.serve_in_sandbox(
+                FORWARDED_PORTS[50:], [Op("listen", OpKind.LISTEN, busy_address)]
+            )
+
+        self.assertEqual(outcome, ("ok", SERVER_GREETING))
 
 
 class InstructionsTests(SandboxTestCase):

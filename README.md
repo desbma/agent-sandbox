@@ -41,7 +41,7 @@ The sandbox and microVM scripts were preceded by experiments with different cont
   - read-only: system directories (`/usr`, an allowlist of `/etc`...), agent instructions, a few tool configs, and the `.git`/`.jj` VCS directories
   - overlayfs, with writes kept in the sandbox: development caches (`cargo`, `uv`...) and build directories (Rust `target/`, Python `.venv`)
   - shadowed by an empty tmpfs, with only an allowlist mounted back: `$HOME`, `/run`, `/tmp`..., and in scratch mode (launch directory under `/tmp`) each agent's session history
-- Gives the agent its own network through [pasta](https://passt.top/): outgoing connections are allowed except to the host's loopback, where only DNS and the optional [`agent-proxy`](#agent-proxy) are reachable, and the ports the agent listens on are reachable from the host's loopback
+- Gives the agent its own network through [pasta](https://passt.top/): outgoing connections are allowed except to the host's loopback, where only DNS and the optional [`agent-proxy`](#agent-proxy) are reachable, and the ports the agent listens on in 18000-18099 are reachable from the host's loopback
 - Exposes `/dev/kvm` and the host CPU topology
 - Injects a prompt describing the sandbox, appended to the global instructions
 - Auth profiles switching an agent to another account: `SANDBOX_AGENT_<AGENT>_AUTH=<profile>`

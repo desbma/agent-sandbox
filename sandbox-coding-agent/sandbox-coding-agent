@@ -925,13 +925,16 @@ MOUNTS: list[Mount] = [
     Mount(CWD, MountKind.BIND_RW),
 ]
 
+# sandbox ports reachable from host loopback
+FORWARDED_PORTS = range(18000, 18100)
+
 # global dynamically generated AGENTS.md
 GLOBAL_AGENTS_MD_INTRO = f"""## Sandbox environment
 
 You are running in a `bwrap` based sandbox, set up by the `{LAUNCHER_HOST_PATH}` script on the host. `{LAUNCHER_COPY_PATH}` is a read-only copy of that script, taken at launch: read it only when this section does not answer a question about how the sandbox works (mounts, generated paths, auth profiles, why an operation is denied), and search it for the relevant part rather than reading it whole.
 
 - Do not attempt to directly run commands that require privileges (`sudo`, `su`, etc.), they would fail. If you need to do so, use the `agent-microvm` skill.
-- You have internet and LAN access, but the host's loopback services are out of reach, except its DNS resolver and, when `HTTPS_PROXY` is set, the proxy it names: `localhost` is the sandbox's own, and so is the host's main IP address. A TCP server listening in the sandbox on `127.0.0.1`, `0.0.0.0` or `::` becomes reachable at the host's `127.0.0.1` on the same port within a second, unless that port is below 1024, in the host's ephemeral range (32768-60999 by default), or already used on the host."""
+- You have internet and LAN access, but the host's loopback services are out of reach, except its DNS resolver and, when `HTTPS_PROXY` is set, the proxy it names: `localhost` is the sandbox's own, and so is the host's main IP address. A TCP server listening in the sandbox on `127.0.0.1`, `0.0.0.0` or `::` on a port in {FORWARDED_PORTS.start}-{FORWARDED_PORTS.stop - 1} becomes reachable at the host's `127.0.0.1` on the same port within a second, unless the host already uses that port; on any other port, it stays inside the sandbox. Bind a port in that range only for a server the user is meant to connect to, never for a server started for your own tests."""
 
 # tools to expose in sandbox, even if not under /usr
 HOME_TOOLS = [
@@ -1142,14 +1145,16 @@ FILES: dict[Path, File] = {
 }
 
 # network setup of the launcher's own namespace, given its PID: a copy of the host's interfaces,
-# reaching host loopback only on the DNS port and the proxy's, with sandbox servers reachable
-# from host 127.0.0.1
+# reaching host loopback only on the DNS port and the proxy's, with sandbox servers on the
+# forwarded ports reachable from host 127.0.0.1
 PASTA_ARGS = [
     "pasta",
     "--config-net",
     "--quiet",
     "-t",
-    "127.0.0.1/auto",
+    # exclusions only: pasta skips the busy ports of such a spec, but abandons an included
+    # range at its first busy port
+    f"127.0.0.1/~1-{FORWARDED_PORTS.start - 1},~{FORWARDED_PORTS.stop}-65535,auto",
     "--host-lo-to-ns-lo",
     "-u",
     "none",

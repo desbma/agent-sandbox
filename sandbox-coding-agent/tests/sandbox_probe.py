@@ -15,6 +15,8 @@ from typing import ClassVar
 
 NETWORK_TIMEOUT_SECONDS = 10.0
 SERVER_GREETING = b"sandbox-probe"
+# sockets the LISTEN op keeps open until the probe exits
+LISTENERS: list[socket.socket] = []
 
 
 class OpKind(enum.Enum):
@@ -40,6 +42,7 @@ class OpKind(enum.Enum):
     UDP_SEND = enum.auto()
     UNIX_CONNECT = enum.auto()
     SERVE = enum.auto()
+    LISTEN = enum.auto()
 
 
 def errno_name(exc: OSError) -> str:
@@ -111,6 +114,11 @@ def serve(address: str) -> None:
             connection.sendall(SERVER_GREETING)
 
 
+def listen(address: str) -> None:
+    """Listen on host:port until the probe exits."""
+    LISTENERS.append(socket.create_server(split_address(address)))
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class Op:
     """A labelled observation to run inside the sandbox."""
@@ -142,6 +150,7 @@ class Op:
         OpKind.UDP_SEND: attempt(send_datagram),
         OpKind.UNIX_CONNECT: attempt(unix_connect),
         OpKind.SERVE: attempt(serve),
+        OpKind.LISTEN: attempt(listen),
     }
 
     def run(self) -> bool | str | list[str] | None:

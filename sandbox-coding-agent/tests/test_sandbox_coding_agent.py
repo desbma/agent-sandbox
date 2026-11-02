@@ -907,6 +907,10 @@ class GenGlobalAgentsMdTests(unittest.TestCase):
             "`/run/sandbox-coding-agent/launcher` is a read-only copy", content
         )
 
+    def test_forwarded_ports_range(self) -> None:
+        """Name the range of sandbox ports reachable from host loopback."""
+        self.assertIn("on a port in 18000-18099 ", self.render())
+
     def test_agent_file_between_base_and_section(self) -> None:
         """Insert the per-agent file after the base instructions, before the sandbox section."""
         self.base_path.write_text("# my base\n")
@@ -1228,9 +1232,9 @@ class NetworkTests(unittest.TestCase):
     """Tests of the sandbox network namespace setup."""
 
     def test_pasta_reaches_only_dns_on_host_loopback(self) -> None:
-        """Cut the sandbox off from host loopback but its DNS port, and forward sandbox servers back to it."""
+        """Cut the sandbox off from host loopback but its DNS port, and forward sandbox servers on dedicated ports back to it."""
         expected = (
-            "pasta --config-net --quiet -t 127.0.0.1/auto --host-lo-to-ns-lo "
+            "pasta --config-net --quiet -t 127.0.0.1/~1-17999,~18100-65535,auto --host-lo-to-ns-lo "
             "-u none -T 53 -U 53 --no-map-gw --dns none"
         )
         self.assertEqual(launcher.PASTA_ARGS, expected.split())

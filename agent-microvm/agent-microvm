@@ -149,7 +149,7 @@ DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
 PREPARE_LOCK_FILENAME = "prepare.lock"
 SESSION_LOCK_FILENAME = "session.lock"
-PREPARE_RECIPE_VERSION = 9
+PREPARE_RECIPE_VERSION = 10
 ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 BOOT_TRACE_ENV_VAR = "AGENT_MICROVM_BOOT_TRACE"
 HOST_TRACE_VIRTIOFSD_LAUNCHED = "host:virtiofsd-launched"
@@ -541,8 +541,15 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
-busybox mkdir -p /dev/pts /run /tmp {GUEST_USR_LOWER_MOUNTPOINT} {WORKSPACE_MOUNTPOINT}
+busybox mkdir -p /dev/pts /dev/shm /dev/mqueue /run /tmp {GUEST_USR_LOWER_MOUNTPOINT} {WORKSPACE_MOUNTPOINT}
 mount -t devpts devpts /dev/pts
+mount -t tmpfs -o noexec,nosuid,nodev,mode=1777 shm /dev/shm
+mount -t mqueue -o noexec,nosuid,nodev mqueue /dev/mqueue
+mount -t cgroup2 -o noexec,nosuid,nodev,nsdelegate cgroup2 /sys/fs/cgroup
+busybox ln -s /proc/self/fd /dev/fd
+busybox ln -s /proc/self/fd/0 /dev/stdin
+busybox ln -s /proc/self/fd/1 /dev/stdout
+busybox ln -s /proc/self/fd/2 /dev/stderr
 mount -t tmpfs tmpfs /run
 mount -t tmpfs tmpfs /tmp
 busybox mkdir -p {GUEST_USR_OVERLAY_UPPER} {GUEST_USR_OVERLAY_WORK}

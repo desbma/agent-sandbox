@@ -140,6 +140,29 @@ class MicrovmIntegrationTests(unittest.TestCase):
             core_base = (index // thread_count) * thread_count
             self.assertEqual(siblings, set(range(core_base, core_base + thread_count)))
 
+    def test_dev_fd_links_resolve(self) -> None:
+        """Read through process substitution and /dev/stdin in the guest."""
+        result = run_guest(
+            ("bash", "-c", "cat <(echo fd) && echo stdin | cat /dev/stdin")
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "fd\nstdin\n")
+
+    def test_standard_kernel_filesystems_are_mounted(self) -> None:
+        """Find shared memory, message queue and cgroup2 mounts in the guest."""
+        script = (
+            'awk \'$2 == "/dev/shm" || $2 == "/dev/mqueue" || $2 == "/sys/fs/cgroup"'
+            " {print $2, $3}' /proc/self/mounts"
+        )
+        result = run_guest(("sh", "-c", script))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            result.stdout,
+            "/dev/shm tmpfs\n/dev/mqueue mqueue\n/sys/fs/cgroup cgroup2\n",
+        )
+
     @unittest.skipIf(
         GITHUB_HOSTED_RUNNER, "GitHub-hosted runners drop inbound ICMP echo replies"
     )

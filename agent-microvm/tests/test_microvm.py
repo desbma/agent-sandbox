@@ -951,6 +951,29 @@ class MicrovmCommandTests(unittest.TestCase):
 
         self.assertEqual(scripts[0], scripts[1])
 
+    def test_guest_init_links_standard_fd_paths(self) -> None:
+        """Generate guest init that links /dev/fd and the standard stream paths."""
+        script = agent_microvm.guest_init_script()
+
+        self.assertIn("busybox ln -s /proc/self/fd /dev/fd", script)
+        for fd, name in enumerate(("stdin", "stdout", "stderr")):
+            self.assertIn(f"busybox ln -s /proc/self/fd/{fd} /dev/{name}", script)
+
+    def test_guest_init_mounts_standard_kernel_filesystems(self) -> None:
+        """Generate guest init that mounts shared memory, message queues and cgroup2."""
+        script = agent_microvm.guest_init_script()
+
+        self.assertIn(
+            "mount -t tmpfs -o noexec,nosuid,nodev,mode=1777 shm /dev/shm", script
+        )
+        self.assertIn(
+            "mount -t mqueue -o noexec,nosuid,nodev mqueue /dev/mqueue", script
+        )
+        self.assertIn(
+            "mount -t cgroup2 -o noexec,nosuid,nodev,nsdelegate cgroup2 /sys/fs/cgroup",
+            script,
+        )
+
     def test_guest_init_restores_sudo_setuid(self) -> None:
         """Generate guest init that restores the sudo setuid bit dropped by rootless apk."""
         script = agent_microvm.guest_init_script()

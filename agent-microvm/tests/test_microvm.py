@@ -49,6 +49,7 @@ NEWC_HEADER_LEN = 110
 NEWC_FIELD_COUNT = 13
 CPIO_ALIGNMENT = 4
 CPIO_TRAILER_NAME = "TRAILER!!!"
+BOOT_CONSOLE_LINE = "Run /init as init process\r\n"
 
 
 def align(size: int) -> int:
@@ -212,7 +213,6 @@ class MicrovmCommandTests(unittest.TestCase):
         )
 
         command = agent_microvm.build_ssh_command(session)
-        remote = command[-1]
 
         self.assertEqual(command[0], "ssh")
         self.assertEqual(command[command.index("-i") + 1], str(SSH_PRIVATE_KEY_PATH))
@@ -222,9 +222,10 @@ class MicrovmCommandTests(unittest.TestCase):
         self.assertNotIn("ProxyCommand", " ".join(command))
         self.assertIn("-t", command)
         self.assertIn(f"{agent_microvm.GUEST_USER_NAME}@127.0.0.1", command)
-        self.assertIn("cd /home/user", remote)
-        self.assertIn("export LANG=en_US.UTF-8", remote)
-        self.assertIn("exec htop", remote)
+        self.assertEqual(
+            command[-1],
+            agent_microvm.build_remote_command(session.command, session.environment),
+        )
 
     def test_ssh_command_omits_pty_when_not_a_tty(self) -> None:
         """Skip pseudo-terminal allocation when the local stdin is not a tty."""
@@ -246,7 +247,7 @@ class MicrovmCommandTests(unittest.TestCase):
             ("bash", "-c", "echo hi"), (("LANG", "with space"),)
         )
 
-        self.assertIn("cd /home/user", remote)
+        self.assertIn("cd /home/user/workspace || exit", remote.split("; "))
         self.assertIn("export LANG='with space'", remote)
         self.assertIn("exec bash -c 'echo hi'", remote)
 
@@ -263,7 +264,7 @@ class MicrovmCommandTests(unittest.TestCase):
         """Start the configured login shell when no guest command is requested."""
         remote = agent_microvm.build_remote_command((), ())
 
-        self.assertIn("cd /home/user", remote)
+        self.assertIn("cd /home/user/workspace || exit", remote.split("; "))
         self.assertIn("exec /bin/bash -l", remote)
 
     def test_find_free_tcp_port_returns_a_bindable_port(self) -> None:
@@ -915,14 +916,23 @@ class MicrovmCommandTests(unittest.TestCase):
 
             self.assertFalse(stale_dir.exists())
 
-    def test_guest_init_mounts_workspace_best_effort(self) -> None:
-        """Generate guest init that mounts the workspace best-effort and powers off."""
+    def test_guest_init_powers_off_when_a_share_mount_fails(self) -> None:
+        """Generate guest init that reports a failed share mount and powers off."""
         script = agent_microvm.guest_init_script()
 
-        self.assertIn("mount -t virtiofs workspace /home/user/workspace", script)
         self.assertIn("modprobe virtiofs", script)
-        self.assertIn("workspace mount failed", script)
-        self.assertIn("poweroff -f", script)
+        self.assertIn('mount_error=$(mount -t virtiofs "$1" "$2" 2>&1)', script)
+        self.assertIn(
+            f'echo "{agent_microvm.GUEST_FATAL_PREFIX}Mounting the $1 share failed: '
+            '$mount_error"\n        poweroff -f\n',
+            script,
+        )
+
+    def test_guest_init_mounts_workspace_at_fixed_path(self) -> None:
+        """Generate guest init that mounts the workspace share at the fixed guest path."""
+        script = agent_microvm.guest_init_script()
+
+        self.assertIn("mount_share workspace /home/user/workspace\n", script)
 
     def test_guest_init_mounts_exchange_at_fixed_path(self) -> None:
         """Generate guest init that mounts the exchange share at the fixed guest path."""
@@ -930,8 +940,7 @@ class MicrovmCommandTests(unittest.TestCase):
         mountpoint = agent_microvm.EXCHANGE_MOUNTPOINT
 
         self.assertIn(f"mkdir -p {mountpoint}", script)
-        self.assertIn(f"mount -t virtiofs exchange {mountpoint}", script)
-        self.assertIn("exchange mount failed", script)
+        self.assertIn(f"mount_share exchange {mountpoint}\n", script)
 
     def test_guest_init_ignores_host_runtime_dir(self) -> None:
         """Generate identical guest init whatever the host runtime directory is."""
@@ -1033,7 +1042,7 @@ class MicrovmCommandTests(unittest.TestCase):
             f"mount -t squashfs -o ro /dev/vda {agent_microvm.GUEST_USR_LOWER_MOUNTPOINT}"
         )
         workspace_index = script.index(
-            f"mount -t virtiofs {agent_microvm.WORKSPACE_SHARE_TAG}"
+            f"mount_share {agent_microvm.WORKSPACE_SHARE_TAG}"
         )
         self.assertLess(usr_mount_index, workspace_index)
 
@@ -1226,6 +1235,74 @@ class MicrovmCommandTests(unittest.TestCase):
         self.assertEqual(match.group(1), "12")
         self.assertIsNone(
             agent_microvm.QEMU_VCPU_COMM_PATTERN.fullmatch("qemu-system-x86")
+        )
+
+    def assert_guest_ready_raises(
+        self, console: str, exit_status: int | None, message: str
+    ) -> None:
+        """Assert that waiting on a guest with this console and QEMU status raises message."""
+        with tempfile.TemporaryDirectory() as directory:
+            console_log_path = Path(directory) / "console.log"
+            console_log_path.write_text(console, encoding="utf-8")
+            with (
+                unittest.mock.patch.object(
+                    agent_microvm, "GUEST_READY_TIMEOUT_SECONDS", 0.1
+                ),
+                self.assertRaises(RuntimeError) as raised,
+            ):
+                agent_microvm.wait_for_guest_ready(
+                    unittest.mock.Mock(**{"poll.return_value": exit_status}),
+                    console_log_path,
+                )
+
+        self.assertEqual(str(raised.exception), message)
+
+    def test_wait_for_guest_ready_reports_guest_fatal_error(self) -> None:
+        """Raise the guest's fatal console message, whether or not QEMU has exited."""
+        console = (
+            f"{BOOT_CONSOLE_LINE}{agent_microvm.GUEST_FATAL_PREFIX}Mounting the "
+            "workspace share failed: No such device\r\nreboot: Power down\r\n"
+        )
+        for exit_status in (0, None):
+            with self.subTest(exit_status=exit_status):
+                self.assert_guest_ready_raises(
+                    console,
+                    exit_status,
+                    "Mounting the workspace share failed: No such device",
+                )
+
+    def test_wait_for_guest_ready_waits_for_complete_fatal_line(self) -> None:
+        """Raise the guest's whole fatal message when the console caught it mid-write."""
+        fatal_line = (
+            f"{agent_microvm.GUEST_FATAL_PREFIX}Mounting the workspace share failed: "
+            "No such device\r\n"
+        )
+        split = len(agent_microvm.GUEST_FATAL_PREFIX) + len("Mou")
+        with tempfile.TemporaryDirectory() as directory:
+            console_log_path = Path(directory) / "console.log"
+            console_log_path.write_text(
+                f"{BOOT_CONSOLE_LINE}{fatal_line[:split]}", encoding="utf-8"
+            )
+
+            chunks = iter(("", fatal_line[split:]))
+
+            def poll() -> None:
+                """Report QEMU running, letting the serial console write its next chunk."""
+                with console_log_path.open("a", encoding="utf-8") as console_log:
+                    console_log.write(next(chunks, ""))
+
+            qemu_process = unittest.mock.Mock(**{"poll.side_effect": poll})
+            with self.assertRaises(RuntimeError) as raised:
+                agent_microvm.wait_for_guest_ready(qemu_process, console_log_path)
+
+        self.assertEqual(
+            str(raised.exception), "Mounting the workspace share failed: No such device"
+        )
+
+    def test_wait_for_guest_ready_reports_qemu_exit(self) -> None:
+        """Raise when QEMU exits before the guest is ready or reports a fatal error."""
+        self.assert_guest_ready_raises(
+            BOOT_CONSOLE_LINE, 0, "QEMU exited before the guest became ready"
         )
 
     def test_pin_vcpus_binds_each_thread_to_its_host_cpu(self) -> None:

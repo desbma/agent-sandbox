@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -170,15 +171,12 @@ class MicrovmIntegrationTests(unittest.TestCase):
         self.assertTrue(result.stdout.strip())
 
     def test_workspace_share_round_trips(self) -> None:
-        """Read a host file from the workspace and write one back with host ownership."""
+        """Read a host file from the start directory and write one back with host ownership."""
         with tempfile.TemporaryDirectory() as host_dir:
             host_path = Path(host_dir)
             (host_path / "input.txt").write_text("hello from host\n", encoding="utf-8")
 
-            result = run_guest(
-                ("sh", "-c", "cat workspace/input.txt > workspace/output.txt"),
-                cwd=host_path,
-            )
+            result = run_guest(("cp", "input.txt", "output.txt"), cwd=host_path)
 
             self.assertEqual(result.returncode, 0)
             output_path = host_path / "output.txt"
@@ -186,6 +184,27 @@ class MicrovmIntegrationTests(unittest.TestCase):
                 output_path.read_text(encoding="utf-8"), "hello from host\n"
             )
             self.assertEqual(output_path.stat().st_uid, os.getuid())
+
+    def test_failed_share_mount_raises_guest_error(self) -> None:
+        """Stop with the guest's mount error when the workspace share fails to mount."""
+        qemu_virtiofs_args = agent_microvm.qemu_virtiofs_args
+
+        def mistagged_virtiofs_args(share: agent_microvm.VirtiofsShare) -> list[str]:
+            """Build a share's QEMU arguments, giving the workspace an unknown tag."""
+            return [
+                arg.replace(f",tag={agent_microvm.WORKSPACE_SHARE_TAG}", ",tag=unknown")
+                for arg in qemu_virtiofs_args(share)
+            ]
+
+        with (
+            unittest.mock.patch.object(
+                agent_microvm, "qemu_virtiofs_args", mistagged_virtiofs_args
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "^Mounting the workspace share failed: "
+            ),
+        ):
+            agent_microvm.run_microvm(("true",))
 
     def test_concurrent_vms_exchange_files(self) -> None:
         """Boot two VMs at once and have each read a file the other wrote."""

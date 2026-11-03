@@ -61,10 +61,12 @@ The examples below write that path as `<skill-dir>/agent-microvm` — substitute
   <skill-dir>/agent-microvm
   ```
 
+The command or shell starts in `/home/user/workspace`, the guest's view of the current directory, so relative paths resolve as on the host as long as they stay inside it.
+
 ## What persists, what doesn't
 
 - **The guest is reset on every invocation.** Nothing installed or written inside the VM survives, except under the shared directories below.
-- The **current directory** is mounted read-write at `/home/user/workspace`. Write results there to keep them on the host.
+- The **current directory** is mounted read-write at `/home/user/workspace`, where the command starts. Write results there to keep them on the host.
 - The **exchange directory** is mounted at `/run/agent-microvm-exchange` in the guest and persists across VMs — use it for artifacts that don't belong in the source tree (logs, captures, images). On the host it lives at `$XDG_RUNTIME_DIR/agent-microvm-exchange`, so read results back from there.
 
 ## Guest facts

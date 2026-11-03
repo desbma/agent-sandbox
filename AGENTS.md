@@ -60,7 +60,7 @@ From `sandbox-coding-agent/`:
 
 ```sh
 # integration and unit suites, in a microVM's Debian root: they need /dev/net/tun, which the agent sandbox withholds
-../agent-microvm/agent-microvm bash workspace/tests/microvm-integration.sh
+../agent-microvm/agent-microvm bash tests/microvm-integration.sh
 # performance: also needs hyperfine 2 or later and jj, so it does not run inside the agent sandbox either
 SANDBOX_CODING_AGENT_PERFORMANCE=1 python3 -m unittest discover -s tests -p test_performance.py
 ```

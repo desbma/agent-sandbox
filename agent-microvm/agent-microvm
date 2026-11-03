@@ -115,6 +115,7 @@ GUEST_BASH_PROMPT = f"{SCRIPT_NAME}$ "
 GUEST_BASH_PROMPT_PATH = Path("etc/bash/prompt.sh")
 GUEST_SSH_TCP_PORT = 2222
 GUEST_READY_MARKER = f"{SCRIPT_NAME}: ready"
+GUEST_FATAL_PREFIX = f"{SCRIPT_NAME}: fatal: "
 GUEST_PUBKEY_CMDLINE_KEY = f"{SCRIPT_NAME}.pubkey"
 WORKSPACE_SHARE_TAG = "workspace"
 WORKSPACE_MOUNTPOINT = GUEST_USER_HOME / "workspace"
@@ -148,7 +149,7 @@ DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
 PREPARE_LOCK_FILENAME = "prepare.lock"
 SESSION_LOCK_FILENAME = "session.lock"
-PREPARE_RECIPE_VERSION = 7
+PREPARE_RECIPE_VERSION = 9
 ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 BOOT_TRACE_ENV_VAR = "AGENT_MICROVM_BOOT_TRACE"
 HOST_TRACE_VIRTIOFSD_LAUNCHED = "host:virtiofsd-launched"
@@ -565,18 +566,17 @@ mount -t overlay overlay \\
     /usr
 boot_trace usr-ready
 
+mount_share() {{
+    if ! mount_error=$(mount -t virtiofs "$1" "$2" 2>&1); then
+        echo "{GUEST_FATAL_PREFIX}Mounting the $1 share failed: $mount_error"
+        poweroff -f
+    fi
+    echo "{SCRIPT_NAME}: $1 mounted at $2"
+}}
 modprobe virtiofs || true
-if mount -t virtiofs {WORKSPACE_SHARE_TAG} {WORKSPACE_MOUNTPOINT}; then
-    echo "{SCRIPT_NAME}: workspace mounted at {WORKSPACE_MOUNTPOINT}"
-else
-    echo "{SCRIPT_NAME}: WARNING workspace mount failed"
-fi
+mount_share {WORKSPACE_SHARE_TAG} {WORKSPACE_MOUNTPOINT}
 mkdir -p {EXCHANGE_MOUNTPOINT}
-if mount -t virtiofs {EXCHANGE_SHARE_TAG} {EXCHANGE_MOUNTPOINT}; then
-    echo "{SCRIPT_NAME}: exchange mounted at {EXCHANGE_MOUNTPOINT}"
-else
-    echo "{SCRIPT_NAME}: WARNING exchange mount failed"
-fi
+mount_share {EXCHANGE_SHARE_TAG} {EXCHANGE_MOUNTPOINT}
 chmod 755 {GUEST_USER_HOME}
 chown {GUEST_USER_NAME}:{GUEST_USER_NAME} {GUEST_USER_HOME}
 boot_trace workspace-ready
@@ -897,15 +897,10 @@ def build_remote_command(
     command: Sequence[str], environment: Sequence[tuple[str, str]]
 ) -> str:
     """Build the remote shell command the guest sshd runs for a session."""
-    parts = []
-    if command:
-        parts.append(". /etc/profile")
-    parts.append(f"cd {shlex.quote(str(GUEST_USER_HOME))} 2>/dev/null || cd")
+    parts = [". /etc/profile"] if command else []
+    parts.append(f"cd {shlex.quote(str(WORKSPACE_MOUNTPOINT))} || exit")
     parts.extend(f"export {name}={shlex.quote(value)}" for name, value in environment)
-    if command:
-        parts.append(f"exec {shlex.join(command)}")
-    else:
-        parts.append("exec /bin/bash -l")
+    parts.append(f"exec {shlex.join(command)}" if command else "exec /bin/bash -l")
     return "; ".join(parts)
 
 
@@ -1237,14 +1232,15 @@ def wait_for_guest_ready(
     """
 
     def ready() -> bool:
-        """Report whether the ready marker appeared, raising if QEMU exited early."""
-        ensure_processes_alive(
-            (qemu_process,), "QEMU exited before the guest became ready"
-        )
-        return console_log_path.is_file() and (
-            GUEST_READY_MARKER
-            in console_log_path.read_text(encoding="utf-8", errors="replace")
-        )
+        """Report whether the ready marker appeared, raising if the guest failed to boot."""
+        exited = qemu_process.poll() is not None
+        console = console_log_path.read_text(encoding="utf-8", errors="replace")
+        for line in console[: console.rfind("\n") + 1].splitlines():
+            if line.startswith(GUEST_FATAL_PREFIX):
+                raise RuntimeError(line.removeprefix(GUEST_FATAL_PREFIX))
+        if exited:
+            raise RuntimeError("QEMU exited before the guest became ready")
+        return GUEST_READY_MARKER in console
 
     poll_until(
         GUEST_READY_TIMEOUT_SECONDS,
@@ -1309,7 +1305,8 @@ Boot a fresh, throwaway Alpine microVM, run COMMAND inside it and exit, or open
 an interactive bash shell when no COMMAND is given. The guest has root through
 passwordless sudo and is discarded when the session ends.
 
-The current directory is shared read-write at {WORKSPACE_MOUNTPOINT}.
+The current directory is shared read-write at {WORKSPACE_MOUNTPOINT}, where
+COMMAND or the shell starts.
 The exchange directory persists across VMs:
   {EXCHANGE_MOUNTPOINT} in the guest
   {exchange_dir()} on the host

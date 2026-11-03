@@ -73,6 +73,13 @@ The examples below write that path as `<skill-dir>/agent-microvm` — substitute
 - Login user `user` (uid 1000), passwordless `sudo` to root.
 - Network access is available (DHCP, outbound to the internet).
 
+## Running glibc binaries
+
+The guest's C library is musl. Two ways to run a binary built against glibc:
+
+- **The host's glibc**, for binaries built on the host: copy `/lib64/ld-linux-x86-64.so.2` and the libraries `ldd <binary>` lists into the workspace or exchange directory, then in the guest `sudo mkdir -p /lib64`, copy the loader there, and run the binary with `LD_LIBRARY_PATH` set to that directory. Pro: works whatever the host distribution, and any host binary it starts runs too. Con: musl programs it starts inherit the variable, and fail if they need a library of the same name, such as `libstdc++.so.6`.
+- **`gcompat`**, for prebuilt binaries targeting an old glibc: `sudo apk add gcompat`, then run the binary as is. Pro: a single command. Con: it lacks symbols from recent glibc releases, such as `fcntl64`, `__res_init` and `__isoc23_strtol`, so binaries built on the host fail with `Error relocating …: symbol not found`.
+
 ## Installing OS packages in the VM
 
 Packages come from Alpine's `main` and `community` repositories:

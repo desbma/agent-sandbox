@@ -149,7 +149,7 @@ DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 RUNTIME_PREFIX = f"{SCRIPT_NAME}-"
 PREPARE_LOCK_FILENAME = "prepare.lock"
 SESSION_LOCK_FILENAME = "session.lock"
-PREPARE_RECIPE_VERSION = 10
+PREPARE_RECIPE_VERSION = 11
 ROOTFS_STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 BOOT_TRACE_ENV_VAR = "AGENT_MICROVM_BOOT_TRACE"
 HOST_TRACE_VIRTIOFSD_LAUNCHED = "host:virtiofsd-launched"
@@ -535,6 +535,15 @@ def guest_init_script() -> str:
 set -u
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# pivot_root refuses the initramfs root: stack a bind mount of it over / and
+# rerun this script from there.
+if [ "$#" -eq 0 ]; then
+    mount --bind / /mnt
+    cd /mnt
+    mount --move . /
+    exec busybox chroot . /init stacked
+fi
 
 # Pre-/usr-mount, coreutils replacements in /bin (mkdir, ln, cut, ...) cannot
 # load their libs from /usr/lib yet. Invoke busybox applets directly.

@@ -193,6 +193,19 @@ class MicrovmIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.stdout.strip())
 
+    def test_bwrap_switches_root_as_user_and_root(self) -> None:
+        """Run bwrap, which pivots into a new root, as the user and under sudo."""
+        bwrap = "bwrap --unshare-all --ro-bind / / --dev /dev --proc /proc true"
+        script = (
+            "sudo apk add --no-progress bubblewrap >/dev/null || exit\n"
+            f"{bwrap}; echo user $?\n"
+            f"sudo {bwrap}; echo root $?\n"
+        )
+        result = run_guest(("sh", "-c", script))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ["user 0", "root 0"])
+
     def test_workspace_share_round_trips(self) -> None:
         """Read a host file from the start directory and write one back with host ownership."""
         with tempfile.TemporaryDirectory() as host_dir:

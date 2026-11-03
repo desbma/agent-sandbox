@@ -28,7 +28,7 @@ do
     mkdir -p "/debian/${dir}"
     mount --rbind "/${dir}" "/debian/${dir}"
 done
-# pivot_root refuses the initramfs root, and user namespaces a chroot: stack the Debian tree over /
+# user namespaces refuse a chroot: stack the Debian tree over /
 # and enter it through busybox, as no path to it climbs back through the stacked root
 mount --rbind /debian /debian
 cd /debian

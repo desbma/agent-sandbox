@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Concatenate
 if TYPE_CHECKING:
     import collections.abc
 
-    from mitmproxy import addonmanager, http  # ty: ignore[unresolved-import]
+    from mitmproxy import addonmanager, http  # ty: ignore[import-not-found]
 
 GITHUB_API_HOST = "api.github.com"
 ALLOW_HOSTS = rf"^{re.escape(GITHUB_API_HOST)}:443$"

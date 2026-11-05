@@ -417,7 +417,7 @@ class SessionTmpfsMountsTests(unittest.TestCase):
 
 
 class AuthProfilesTests(TempDirTestCase):
-    """Tests of the agent specs exposing the credentials of the selected auth profile."""
+    """Tests of the agent specs exposing the files of the selected auth profile."""
 
     def setUp(self) -> None:
         """Build agent specs whose credentials live in temporary config and state directories."""
@@ -425,6 +425,9 @@ class AuthProfilesTests(TempDirTestCase):
         self.credentials = config_dir / ".credentials.json"
         self.profile = config_dir / ".credentials-pro.json"
         self.sandbox_path = Path("/home/user/.claude/.credentials.json")
+        self.config = config_dir / ".claude.json"
+        self.profile_config = config_dir / ".claude-pro.json"
+        self.sandbox_config = Path("/home/user/.claude/.claude.json")
         # the agent's own entries, which its credentials add to
         own_mount = launcher.Mount(Path("/opt/agent"), launcher.MountKind.BIND_RO)
         self.spec = launcher.AgentSpec(
@@ -490,6 +493,23 @@ class AuthProfilesTests(TempDirTestCase):
         """Return spec with src mounted at the credentials path after its own mounts."""
         mount = launcher.Mount(src, launcher.MountKind.BIND_RW, self.sandbox_path)
         return dataclasses.replace(spec, mounts=(*spec.mounts, mount))
+
+    def with_profile_file(self, spec: launcher.AgentSpec) -> launcher.AgentSpec:
+        """Return spec keeping its config apart per auth profile."""
+        mount = launcher.Mount(
+            self.config, launcher.MountKind.BIND_RW, self.sandbox_config
+        )
+        return dataclasses.replace(spec, profile_files=(mount,))
+
+    def with_profile_mounts(self, spec: launcher.AgentSpec) -> launcher.AgentSpec:
+        """Return spec with the pro profile's credentials then config mounted after its own mounts."""
+        mount = launcher.Mount(
+            self.profile_config, launcher.MountKind.BIND_RW, self.sandbox_config
+        )
+        with_credentials = self.with_credentials(spec, self.profile)
+        return dataclasses.replace(
+            with_credentials, mounts=(*with_credentials.mounts, mount)
+        )
 
     def test_credentials_of_known_agents(self) -> None:
         """Point every agent supporting auth profiles at its credentials file."""
@@ -571,6 +591,18 @@ class AuthProfilesTests(TempDirTestCase):
         )
         self.assertEqual(self.profile.read_text(), '{"token": "pro"}')
 
+    def test_publishes_complete_profile_file(self) -> None:
+        """Publish a seeded file only once its content is written."""
+        hardlink_to = Path.hardlink_to
+
+        def link_and_read(path: Path, target: str) -> None:
+            """Link path to target, then read it as a racing launcher would."""
+            hardlink_to(path, target)
+            self.assertEqual(path.read_text(), "{}")
+
+        with unittest.mock.patch.object(Path, "hardlink_to", link_and_read):
+            launcher.seed_profile_file(self.config)
+
     def test_seeds_new_profile_without_default_credentials(self) -> None:
         """Create empty credentials for a new profile of an agent that is not logged in."""
         specs = self.resolve({"claude": self.spec}, claude="pro")
@@ -580,6 +612,65 @@ class AuthProfilesTests(TempDirTestCase):
         )
         self.assertEqual(self.profile.read_text(), "{}")
         self.assertEqual(self.profile.stat().st_mode & 0o777, 0o600)
+
+    def test_profile_files_of_known_agents(self) -> None:
+        """Keep the account state of every agent holding one apart per auth profile."""
+        self.assertEqual(
+            {name: spec.profile_files for name, spec in launcher.AGENTS.items()},
+            {
+                "amp": (),
+                "claude": (
+                    launcher.Mount(
+                        FAKE_CONFIG_HOME / "claude/.claude.json",
+                        launcher.MountKind.BIND_RW,
+                        FAKE_HOME / ".claude/.claude.json",
+                    ),
+                ),
+                "codex": (),
+                "hax": (),
+                "pi": (),
+            },
+        )
+
+    def test_no_profile_file_mount_without_selected_profile(self) -> None:
+        """Leave the agent's own account state in place when no profile is selected."""
+        spec = self.with_profile_file(self.spec)
+
+        self.assertEqual(self.resolve({"claude": spec}), {"claude": spec})
+        self.assertFalse(self.profile_config.exists())
+
+    def test_seeds_new_profile_files_empty(self) -> None:
+        """Create empty account state for a new profile, never copying the default one."""
+        self.config.write_text('{"account": "default"}')
+        spec = self.with_profile_file(self.spec)
+
+        specs = self.resolve({"claude": spec}, claude="pro")
+
+        self.assertEqual(specs, {"claude": self.with_profile_mounts(spec)})
+        self.assertEqual(self.profile_config.read_text(), "{}")
+        self.assertEqual(self.profile_config.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.config.read_text(), '{"account": "default"}')
+
+    def test_keeps_existing_profile_files(self) -> None:
+        """Select the account state of an already used profile without modifying it."""
+        self.config.write_text('{"account": "default"}')
+        self.profile_config.write_text('{"account": "pro"}')
+        spec = self.with_profile_file(self.spec)
+
+        specs = self.resolve({"claude": spec}, claude="pro")
+
+        self.assertEqual(specs, {"claude": self.with_profile_mounts(spec)})
+        self.assertEqual(self.profile_config.read_text(), '{"account": "pro"}')
+
+    def test_seeds_missing_default_profile_files(self) -> None:
+        """Create the empty default account state a profile's file is mounted over."""
+        spec = self.with_profile_file(self.spec)
+
+        specs = self.resolve({"claude": spec}, claude="pro")
+
+        self.assertEqual(specs, {"claude": self.with_profile_mounts(spec)})
+        self.assertEqual(self.config.read_text(), "{}")
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
 
     def test_creates_missing_config_dir(self) -> None:
         """Create the config directory of an agent that was never launched."""

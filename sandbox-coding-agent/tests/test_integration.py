@@ -1157,6 +1157,32 @@ class AgentSpecificTests(SandboxTestCase):
         )
         self.assertEqual(credentials.read_text(), '{"token": "default"}')
 
+    def test_auth_profile_swaps_claude_config(self) -> None:
+        """Expose the selected profile's empty claude config, leaving the default one alone."""
+        config = self.fixture.config_home / "claude/.claude.json"
+        config.write_text('{"account": "default"}')
+        sandbox_config = self.fixture.home / ".claude/.claude.json"
+
+        report = self.run_probe(
+            [
+                Op("config", OpKind.READ, sandbox_config),
+                Op("atomic_write", OpKind.RENAME_OVER, sandbox_config),
+                Op("write", OpKind.WRITE, sandbox_config),
+            ],
+            agent="claude",
+            extra_env={"SANDBOX_AGENT_CLAUDE_AUTH": "pro"},
+        )
+
+        self.assertEqual(report["config"], "{}")
+        # claude rewrites its config in place when the rename replacing it hits the mount
+        self.assertEqual(report["atomic_write"], "EBUSY")
+        self.assertEqual(report["write"], "ok")
+        self.assertEqual(
+            (self.fixture.config_home / "claude/.claude-pro.json").read_text(),
+            "canary",
+        )
+        self.assertEqual(config.read_text(), '{"account": "default"}')
+
     def test_default_credentials_stay_unmounted(self) -> None:
         """Expose the default credentials through the config directory only."""
         credentials = self.fixture.config_home / "claude/.credentials.json"

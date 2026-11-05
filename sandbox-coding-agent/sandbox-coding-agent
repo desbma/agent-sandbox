@@ -143,6 +143,8 @@ class AgentSpec:
     session_dir: Path | None = None
     # credentials file, None for agents without auth profile support
     credentials: Mount | LinkedCredentials | None = None
+    # other files holding account state, kept apart per auth profile like the credentials
+    profile_files: tuple[Mount, ...] = ()
     # arguments of the agent's own login command, None when it starts fine on empty credentials
     login_args: tuple[str, ...] | None = None
     mounts: tuple[Mount, ...] = ()
@@ -298,20 +300,26 @@ def session_tmpfs_mounts(specs: collections.abc.Iterable[AgentSpec]) -> list[Mou
     ]
 
 
-def profile_credentials(credentials: Path, profile: str) -> Path:
-    """Return the credentials file of an auth profile, creating it empty when the profile is new."""
-    variant = credentials.with_stem(f"{credentials.stem}-{profile}")
-    if not variant.exists():
-        variant.parent.mkdir(parents=True, exist_ok=True)
-        # seeding from another profile would put one refresh token in two files, and the first
-        # rotation strands the one that did not refresh
-        with tempfile.NamedTemporaryFile("w", dir=variant.parent) as seed:
-            seed.write(EMPTY_CREDENTIALS)
-            seed.flush()
-            # a launcher racing on the same new profile either wins the link or keeps its own
-            # credentials, and never sees a half written file
-            with contextlib.suppress(FileExistsError):
-                variant.hardlink_to(seed.name)
+def seed_profile_file(path: Path) -> None:
+    """Create an empty auth profile file at path, unless one exists."""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent) as seed:
+        seed.write(EMPTY_PROFILE_FILE)
+        seed.flush()
+        # a launcher racing on the same new file either wins the link or keeps its own file,
+        # and never sees a half written one
+        with contextlib.suppress(FileExistsError):
+            path.hardlink_to(seed.name)
+
+
+def profile_file(path: Path, profile: str) -> Path:
+    """Return an auth profile's variant of an agent file, creating it empty when the profile is new."""
+    variant = path.with_stem(f"{path.stem}-{profile}")
+    # seeding from another profile would carry its account over, and put one refresh token in
+    # two files, the first rotation stranding the one that did not refresh
+    seed_profile_file(variant)
     return variant
 
 
@@ -364,7 +372,7 @@ def apply_auth_profiles(
     launched_agent: str,
     launched_args: collections.abc.Sequence[str],
 ) -> dict[str, AgentSpec]:
-    """Return each agent's spec exposing the credentials of its selected auth profile, if any."""
+    """Return each agent's spec exposing the files of its selected auth profile, if any."""
     applied = dict(agents)
     for name, spec in agents.items():
         profile_var = auth_profile_var(name)
@@ -377,8 +385,8 @@ def apply_auth_profiles(
             continue
         if spec.credentials is None:
             fatal_error(f"Agent {name!r} does not support auth profiles")
-        credentials = profile_credentials(spec.credentials.src, profile)
-        empty = credentials.read_text() == EMPTY_CREDENTIALS
+        credentials = profile_file(spec.credentials.src, profile)
+        empty = credentials.read_text() == EMPTY_PROFILE_FILE
         login_args = spec.login_args
         if empty and (login_args is not None):
             logging_in = (name == launched_agent) and runs_login(
@@ -393,12 +401,23 @@ def apply_auth_profiles(
                     f"{name.title()} auth profile {profile!r} is empty, run `{command}`"
                 )
         if isinstance(spec.credentials, LinkedCredentials):
-            applied[name] = linked_profile_spec(
+            with_credentials = linked_profile_spec(
                 name, spec, spec.credentials, credentials
             )
         else:
             mount = dataclasses.replace(spec.credentials, src=credentials)
-            applied[name] = dataclasses.replace(spec, mounts=(*spec.mounts, mount))
+            with_credentials = dataclasses.replace(spec, mounts=(*spec.mounts, mount))
+        for file in spec.profile_files:
+            # the variant mounts over the default file, which bwrap would otherwise create empty,
+            # an invalid file to the agent
+            seed_profile_file(file.src)
+        profile_mounts = (
+            dataclasses.replace(file, src=profile_file(file.src, profile))
+            for file in spec.profile_files
+        )
+        applied[name] = dataclasses.replace(
+            with_credentials, mounts=(*with_credentials.mounts, *profile_mounts)
+        )
     return applied
 
 
@@ -954,8 +973,8 @@ HOME_TOOLS = [
     "uvx",
 ]
 
-# credentials of an auth profile that was never logged into
-EMPTY_CREDENTIALS = "{}"
+# content of an auth profile's files before its first use
+EMPTY_PROFILE_FILE = "{}"
 
 # supported agents, and everything to provision them with
 AGENTS: dict[str, AgentSpec] = {
@@ -980,6 +999,15 @@ AGENTS: dict[str, AgentSpec] = {
             XDG_CONFIG_HOME / "claude/.credentials.json",
             MountKind.BIND_RW,
             HOME / ".claude/.credentials.json",
+        ),
+        # account identity and model access caches; claude rewrites this config in place when
+        # the rename replacing it hits the mount
+        profile_files=(
+            Mount(
+                XDG_CONFIG_HOME / "claude/.claude.json",
+                MountKind.BIND_RW,
+                HOME / ".claude/.claude.json",
+            ),
         ),
         mounts=(
             Mount(

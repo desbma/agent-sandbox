@@ -8,6 +8,7 @@ import dataclasses
 import enum
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -103,6 +104,7 @@ HAX_OWN_TOOLS = HAX_FIXED_TOOLS | {"subagent"}
 # hax variables overriding the request, never inherited
 HAX_LAUNCH_VARIABLES = frozenset(
     {
+        "HAX_CONTEXT_LIMIT",
         "HAX_MAX_TURNS",
         "HAX_NO_AGENTS_MD",
         "HAX_NO_SKILLS",
@@ -226,6 +228,7 @@ class Request:
     system_prompt: str | None
     appended_system_prompt: str | None
     max_turns: int | None
+    context_window: int | None
     session_id: uuid.UUID | None
     session: bool
     events: bool
@@ -287,6 +290,15 @@ class HelpFormatter(argparse.HelpFormatter):
                 line, width, subsequent_indent=indent, break_on_hyphens=False
             )
         ]
+
+
+def token_count(value: str) -> int:
+    """Parse a positive token count, a k or m suffix counting decimal thousands or millions."""
+    match = re.fullmatch(r"([1-9][0-9]*)([km]?)", value, re.IGNORECASE)
+    if match is None:
+        raise argparse.ArgumentTypeError(f"Invalid token count: {value}")
+    digits, suffix = match.groups()
+    return int(digits) * {"": 1, "k": 1000, "m": 1000000}[suffix.lower()]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -369,6 +381,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Text appended to the system prompt",
     )
     parser.add_argument("--max-turns", type=int, metavar="N", help="Turn cap")
+    parser.add_argument(
+        "--context-window",
+        type=token_count,
+        metavar="TOKENS",
+        help="Context window the harness compacts against, optionally suffixed by k or m",
+    )
     session = parser.add_mutually_exclusive_group()
     session.add_argument(
         "--session-id",
@@ -591,6 +609,8 @@ def claude_plugin_settings(plugins: Selection) -> dict[str, object]:
 
 def claude_launch(request: Request, prompt: str) -> Launch:
     """Build the claude launch of a request."""
+    if request.context_window is not None:
+        raise UnsatisfiableError("has no context window setting")
     skills = with_invoked_skill(request.skills, request.invoked_skill)
     skills = skills.resolve_optional(find_skills(Harness.CLAUDE))
     argv = ["claude", "--model", request.model]
@@ -808,6 +828,8 @@ def pi_launch(request: Request, prompt: str) -> Launch:
     """Build the pi launch of a request."""
     if request.max_turns is not None:
         raise UnsatisfiableError("has no turn cap")
+    if request.context_window is not None:
+        raise UnsatisfiableError("has no context window setting")
     model = f"openai-codex/{request.model}"
     if request.effort is not None:
         model += f":{'off' if request.effort == 'none' else request.effort}"
@@ -871,6 +893,16 @@ def hax_environment(request: Request) -> dict[str, str]:
     return env
 
 
+def hax_limit_env(request: Request) -> dict[str, str]:
+    """Build the hax environment setting a request's turn cap and context window."""
+    env = {}
+    if request.max_turns is not None:
+        env["HAX_MAX_TURNS"] = str(request.max_turns)
+    if request.context_window is not None:
+        env["HAX_CONTEXT_LIMIT"] = str(request.context_window)
+    return env
+
+
 def hax_effort(model: str, effort: str) -> str:
     """Raise an effort level to the lowest one hax's catalog gives the model from there up."""
     catalog_path = Path.home() / ".cache/hax/catalog.json"
@@ -914,10 +946,8 @@ def hax_launch(request: Request, prompt: str) -> Launch:
         raise UnsatisfiableError(
             "removes all tools only along with skills, instruction files and system prompt"
         )
-    env = {} if raw_mode else hax_environment(request)
+    env = ({} if raw_mode else hax_environment(request)) | hax_limit_env(request)
     flags = ["--raw"] if raw_mode else []
-    if request.max_turns is not None:
-        env["HAX_MAX_TURNS"] = str(request.max_turns)
     if request.events:
         flags.append("--json")
     if not request.session:

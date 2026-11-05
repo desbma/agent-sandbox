@@ -128,6 +128,32 @@ class TranslationTests(FakeHomeTestCase):
             env={"HAX_MAX_TURNS": "3"},
         )
 
+    def test_context_window_set_on_hax(self) -> None:
+        """Give hax the context window, a k or m suffix counting decimal thousands or millions."""
+        for value, tokens in (
+            ("500000", "500000"),
+            ("872k", "872000"),
+            ("1M", "1000000"),
+        ):
+            with self.subTest(value=value):
+                self.assert_launch(
+                    f"--preset bare --model gpt-6-luna --context-window {value} -- PROMPT",
+                    argv="hax --raw --provider=codex --model=gpt-6-luna -p",
+                    env={"HAX_CONTEXT_LIMIT": tokens},
+                )
+
+    def test_non_raw_hax_limits(self) -> None:
+        """Preserve both limits alongside a non-raw hax tool selection."""
+        self.assert_launch(
+            "--model gpt-6-luna --tools -subagent --max-turns 3 --context-window 872k -- PROMPT",
+            argv="hax --provider=codex --model=gpt-6-luna -p",
+            env={
+                "HAX_NO_SUBAGENTS": "1",
+                "HAX_MAX_TURNS": "3",
+                "HAX_CONTEXT_LIMIT": "872000",
+            },
+        )
+
     def test_bare_forced_on_pi(self) -> None:
         """Give pi a placeholder system prompt, and an empty appendix unless one is given."""
         for option, appended in (
@@ -915,6 +941,20 @@ class TranslationTests(FakeHomeTestCase):
                     agent_worker.parse_request(shlex.split(f"--model opus {option}"))
                 self.assertIn(message, stderr.getvalue())
 
+    def test_malformed_context_window_rejected(self) -> None:
+        """Reject a context window that is not a positive whole number with an optional k or m suffix."""
+        for value in ("0", "0k", "1.5m", "872kb", "k", "-1", "8\uff17\uff12"):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                    agent_worker.parse_request(
+                        ["--model", "gpt-6-luna", f"--context-window={value}"]
+                    )
+                self.assertIn(
+                    f"argument --context-window: Invalid token count: {value}",
+                    stderr.getvalue(),
+                )
+
     def test_adjustment_precedence(self) -> None:
         """Let removals win over additions and additions over optional ones within an adjustment of a selection, and a later adjustment override an earlier one on the names they share."""
         grep = frozenset({"grep"})
@@ -977,6 +1017,18 @@ class TranslationTests(FakeHomeTestCase):
             "  hax: takes no tool list but shell,read,write,edit, with or without subagent\n"
             "  pi: has no turn cap",
         )
+
+    def test_context_window_refused_by_claude_and_pi(self) -> None:
+        """Refuse a context window on the harnesses lacking a per-run setting for it."""
+        for command, harness in (
+            ("--model opus", "claude"),
+            ("--model gpt-6-luna --harness pi", "pi"),
+        ):
+            with self.subTest(harness=harness):
+                self.assert_refusal(
+                    f"{command} --context-window 872k",
+                    f"No harness can satisfy the request:\n  {harness}: has no context window setting",
+                )
 
 
 class ProcessTests(FakeHomeTestCase):
@@ -1116,6 +1168,7 @@ class ProcessTests(FakeHomeTestCase):
         result = self.run_worker(
             "--model gpt-6-luna --tools -subagent",
             env={
+                "HAX_CONTEXT_LIMIT": "872000",
                 "HAX_MAX_TURNS": "3",
                 "HAX_PRESET": "parent",
                 "HAX_SYSTEM_PROMPT": "parent",
